@@ -12,6 +12,7 @@ import { RequestError } from '@agentclientprotocol/sdk'
 import { readFileSync } from 'node:fs'
 import { isAbsolute, resolve as resolvePath } from 'node:path'
 import { PiRpcProcess, PiRpcSpawnError, type PiRpcEvent } from '../pi-rpc/process.js'
+import type { FsBridgeCapabilities } from '../pi-rpc/fs-bridge.js'
 import { maybeAuthRequiredError } from './auth-required.js'
 import { SessionStore } from './session-store.js'
 import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
@@ -34,6 +35,7 @@ type SessionCreateParams = {
   conn: AgentSideConnection
   fileCommands?: import('./slash-commands.js').FileSlashCommand[]
   piCommand?: string
+  clientFs?: FsBridgeCapabilities
 }
 
 export type StopReason = 'end_turn' | 'cancelled' | 'error'
@@ -191,7 +193,8 @@ export class SessionManager {
     try {
       proc = await PiRpcProcess.spawn({
         cwd: params.cwd,
-        piCommand: params.piCommand
+        piCommand: params.piCommand,
+        clientFs: params.clientFs
       })
     } catch (e) {
       if (e instanceof PiRpcSpawnError) {
@@ -312,6 +315,25 @@ export class PiAcpSession {
     this.fileCommands = opts.fileCommands ?? []
 
     this.proc.onEvent(ev => this.handlePiEvent(ev))
+    this.bindFsBridge()
+  }
+
+  /**
+   * Route pi's file reads/writes through the ACP client (fs/read_text_file, fs/write_text_file).
+   * Clients like Zed only track "edited files" for writes that go through these methods.
+   */
+  private bindFsBridge(): void {
+    const bridge = this.proc.fsBridge
+    if (!bridge) return
+
+    bridge.setHandler({
+      readTextFile: bridge.capabilities.readTextFile
+        ? async path => (await this.conn.readTextFile({ sessionId: this.sessionId, path })).content
+        : undefined,
+      writeTextFile: async (path, content) => {
+        await this.conn.writeTextFile({ sessionId: this.sessionId, path, content })
+      }
+    })
   }
 
   setStartupInfo(text: string) {

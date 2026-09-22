@@ -24,7 +24,8 @@ Use `@agentclientprotocol/sdk`:
 
 ## Implementation constraints / decisions
 
-- Do **not** implement ACP client-side FS/terminal delegation in MVP. Pi already reads/writes and executes locally.
+- ACP client-side FS delegation is implemented via a pi extension (`src/pi-extension/acp-fs.ts`) that overrides pi's `read`/`edit`/`write` tools and forwards file operations to the adapter over a local socket (`src/pi-rpc/fs-bridge*.ts`), which calls `fs/read_text_file` / `fs/write_text_file`. Zed only tracks "edited files" for writes made through these methods. Only enabled when the client advertises `fs.writeTextFile`.
+- Do **not** implement ACP terminal delegation. Pi executes commands locally.
 - Ignore `mcpServers` for MVP (accept in params, store in session state).
 - Stream all pi assistant output as ACP `agent_message_chunk` initially.
 - Tool events: map pi tool execution events to ACP `tool_call` / `tool_call_update` (as text content).

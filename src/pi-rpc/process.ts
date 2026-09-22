@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import * as readline from 'node:readline'
 import { getPiCommand, shouldUseShellForPiCommand } from './command.js'
+import { PiFsBridge, resolveFsBridgeExtensionPath, type FsBridgeCapabilities } from './fs-bridge.js'
 
 export class PiRpcSpawnError extends Error {
   /** Underlying spawn error code, e.g. ENOENT, EACCES */
@@ -74,6 +75,12 @@ type SpawnParams = {
   piCommand?: string
   /** If set, pi will persist the session to this exact file (via `--session <path>`). */
   sessionPath?: string
+  /**
+   * ACP client `fs` capabilities. When the client can write files, pi's read/edit/write
+   * tools are routed through the client via the FS bridge extension so the editor can
+   * track the session's edits.
+   */
+  clientFs?: FsBridgeCapabilities
 }
 
 export class PiRpcProcess {
@@ -81,9 +88,13 @@ export class PiRpcProcess {
   private readonly pending = new Map<string, { resolve: (v: PiRpcResponse) => void; reject: (e: unknown) => void }>()
   private eventHandlers: Array<(ev: PiRpcEvent) => void> = []
   private readonly preludeLines: string[] = []
+  /** Present when file operations are routed through the ACP client. */
+  readonly fsBridge: PiFsBridge | null
 
-  private constructor(child: ChildProcessWithoutNullStreams) {
+  private constructor(child: ChildProcessWithoutNullStreams, fsBridge: PiFsBridge | null) {
     this.child = child
+    this.fsBridge = fsBridge
+    child.on('exit', () => fsBridge?.close())
 
     const rl = readline.createInterface({ input: child.stdout })
     rl.on('line', line => {
@@ -137,10 +148,13 @@ export class PiRpcProcess {
     const args = ['--mode', 'rpc', '--no-themes']
     if (params.sessionPath) args.push('--session', params.sessionPath)
 
+    const fsBridge = params.clientFs?.writeTextFile ? await PiFsBridge.listen(params.clientFs) : null
+    if (fsBridge) args.push('--extension', resolveFsBridgeExtensionPath())
+
     const child = spawn(cmd, args, {
       cwd: params.cwd,
       stdio: 'pipe',
-      env: process.env,
+      env: { ...process.env, ...fsBridge?.childEnv() },
       shell: shouldUseShellForPiCommand(cmd)
     })
 
@@ -165,6 +179,7 @@ export class PiRpcProcess {
         child.once('error', onError)
       })
     } catch (e: any) {
+      fsBridge?.close()
       const code = typeof e?.code === 'string' ? e.code : undefined
       if (code === 'ENOENT') {
         throw new PiRpcSpawnError(
@@ -184,7 +199,7 @@ export class PiRpcProcess {
       // leave stderr untouched; ACP clients may capture it.
     })
 
-    const proc = new PiRpcProcess(child)
+    const proc = new PiRpcProcess(child, fsBridge)
 
     // Best-effort handshake.
     // Important: pi may emit a get_state response pointing at a sessionFile in a directory
@@ -213,6 +228,7 @@ export class PiRpcProcess {
   }
 
   dispose(signal: NodeJS.Signals | number = 'SIGTERM'): void {
+    this.fsBridge?.close()
     if (this.child.killed) return
     try {
       this.child.kill(signal as any)

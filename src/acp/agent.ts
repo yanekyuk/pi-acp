@@ -27,6 +27,7 @@ import { getAuthMethods } from './auth.js'
 import { SessionManager, type PiAcpSession } from './session.js'
 import { SessionStore } from './session-store.js'
 import { PiRpcProcess } from '../pi-rpc/process.js'
+import type { FsBridgeCapabilities } from '../pi-rpc/fs-bridge.js'
 import { listPiSessions, findPiSession } from './pi-sessions.js'
 import { normalizePiAssistantText, normalizePiMessageText } from './translate/pi-messages.js'
 import { toolResultToText } from './translate/pi-tools.js'
@@ -133,6 +134,9 @@ export class PiAcpAgent implements ACPAgent {
   // Remember recent session cwd and use it as the default filter.
   private lastSessionCwd: string | null = null
 
+  // Client `fs` capabilities from initialize. Drives FS bridge setup for every pi subprocess.
+  private clientFs: FsBridgeCapabilities = { readTextFile: false, writeTextFile: false }
+
   constructor(conn: AgentSideConnection, _config?: unknown) {
     this.conn = conn
     void _config
@@ -201,7 +205,8 @@ export class PiAcpAgent implements ACPAgent {
         proc = await PiRpcProcess.spawn({
           cwd,
           sessionPath: stored.sessionFile,
-          piCommand: process.env.PI_ACP_PI_COMMAND
+          piCommand: process.env.PI_ACP_PI_COMMAND,
+          clientFs: this.clientFs
         })
       } catch (e: any) {
         if (e?.name === 'PiRpcSpawnError') {
@@ -238,6 +243,11 @@ export class PiAcpAgent implements ACPAgent {
     // We currently only support ACP protocol version 1.
     const supportedVersion = 1
     const requested = params.protocolVersion
+
+    this.clientFs = {
+      readTextFile: params.clientCapabilities?.fs?.readTextFile === true,
+      writeTextFile: params.clientCapabilities?.fs?.writeTextFile === true
+    }
 
     return {
       protocolVersion: requested === supportedVersion ? requested : supportedVersion,
@@ -285,7 +295,8 @@ export class PiAcpAgent implements ACPAgent {
       mcpServers: params.mcpServers,
       conn: this.conn,
       fileCommands,
-      piCommand: process.env.PI_ACP_PI_COMMAND
+      piCommand: process.env.PI_ACP_PI_COMMAND,
+      clientFs: this.clientFs
     })
 
     // Fetch state + models once (parallel) to reduce startup latency.

@@ -1,11 +1,14 @@
 import type { AgentSideConnection } from '@agentclientprotocol/sdk'
 import type { PiRpcEvent } from '../../src/pi-rpc/process.js'
+import type { PiFsBridge } from '../../src/pi-rpc/fs-bridge.js'
 
 type SessionUpdateMsg = Parameters<AgentSideConnection['sessionUpdate']>[0]
 
 export class FakeAgentSideConnection {
   readonly updates: SessionUpdateMsg[] = []
   readonly permissionRequests: unknown[] = []
+  readonly fileWrites: Array<{ sessionId: string; path: string; content: string }> = []
+  readonly fileReads: Array<{ sessionId: string; path: string }> = []
   nextPermissionResponse: { outcome: { outcome: 'selected'; optionId: string } | { outcome: 'cancelled' } } = {
     outcome: { outcome: 'selected', optionId: 'allow' }
   }
@@ -20,10 +23,21 @@ export class FakeAgentSideConnection {
     this.permissionRequests.push(params)
     return this.nextPermissionResponse
   }
+
+  async writeTextFile(params: { sessionId: string; path: string; content: string }): Promise<Record<string, never>> {
+    this.fileWrites.push(params)
+    return {}
+  }
+
+  async readTextFile(params: { sessionId: string; path: string }): Promise<{ content: string }> {
+    this.fileReads.push(params)
+    return { content: `client buffer for ${params.path}` }
+  }
 }
 
 export class FakePiRpcProcess {
   private handlers: Array<(ev: PiRpcEvent) => void> = []
+  fsBridge: PiFsBridge | null = null
 
   // spies
   readonly prompts: Array<{ message: string; attachments: unknown[] }> = []

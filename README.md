@@ -18,6 +18,8 @@ Expect some minor breaking changes.
   - Relative file paths from pi are resolved against the session cwd before being emitted as ACP tool locations, which enables follow-along features in clients like Zed
   - For `edit`, `pi-acp` attempts to infer a 1-based line number from a unique `oldText` match in the pre-edit file snapshot and includes it in the emitted tool location when possible
   - For `edit`, `pi-acp` snapshots the file before the tool runs and emits an ACP **structured diff** (`oldText`/`newText`) on completion when possible
+- ACP filesystem delegation (`fs/read_text_file`, `fs/write_text_file`)
+  - When the client advertises `fs.writeTextFile`, `pi-acp` loads a small pi extension (`dist/acp-fs-extension.js`) that overrides pi's built-in `read`/`edit`/`write` tools and routes file contents through the ACP client over a local socket. This is what makes editors like Zed list the files edited by the session (Keep All / Reject All), edit against unsaved buffer contents, and follow the agent's location. If the client rejects an operation (e.g. a path outside the open project), the tool falls back to the local filesystem.
 - Session persistence
   - pi stores its own sessions in `~/.pi/agent/sessions/...`
   - `pi-acp` stores a small mapping file at `~/.pi/pi-acp/session-map.json` so `session/load` can reattach to a previous pi session file
@@ -190,11 +192,12 @@ npm run test
 Project layout:
 
 - `src/acp/*` – ACP server + translation layer
-- `src/pi-rpc/*` – pi subprocess wrapper (RPC protocol)
+- `src/pi-rpc/*` – pi subprocess wrapper (RPC protocol) and the FS bridge socket server
+- `src/pi-extension/*` – pi extension loaded into the pi subprocess (built separately to `dist/acp-fs-extension.js`)
 
 ## Limitations
 
-- No ACP filesystem delegation (`fs/*`) and no ACP terminal delegation (`terminal/*`). pi reads/writes and executes locally.
+- No ACP terminal delegation (`terminal/*`); pi executes commands locally. File reads/writes go through the client only for pi's built-in `read`/`edit`/`write` tools; `bash` and other tools still touch the disk directly.
 - MCP servers are accepted in ACP params and stored in session state, but not wired through to pi in this adapter. If you use [pi MCP adapter](https://github.com/nicobailon/pi-mcp-adapter) it will be available in the ACP client.
 - Assistant streaming is currently sent as `agent_message_chunk` (no separate thought stream).
 - Queue is implemented client-side and should work like pi's `one-at-a-time`
