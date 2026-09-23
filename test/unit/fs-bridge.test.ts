@@ -87,6 +87,26 @@ test('PiFsBridge: reports handler errors and unsupported reads as ok:false', asy
   }
 })
 
+test(
+  'PiFsBridge: falls back to a short Unix socket path when TMPDIR is too long',
+  { skip: process.platform === 'win32' },
+  async t => {
+    const previousTmpdir = process.env.TMPDIR
+    process.env.TMPDIR = `/tmp/${'nested-'.repeat(20)}`
+    t.after(() => {
+      if (previousTmpdir === undefined) delete process.env.TMPDIR
+      else process.env.TMPDIR = previousTmpdir
+    })
+
+    const bridge = await PiFsBridge.listen({ readTextFile: true, writeTextFile: true })
+    try {
+      assert.match(bridge.socketPath, /^\/tmp\/pi-acp-fs-/)
+    } finally {
+      bridge.close()
+    }
+  }
+)
+
 test('PiFsBridge: childEnv advertises the socket and read capability', async () => {
   const bridge = await PiFsBridge.listen({ readTextFile: true, writeTextFile: true })
   try {

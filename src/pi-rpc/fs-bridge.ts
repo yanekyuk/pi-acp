@@ -113,8 +113,16 @@ export function resolveFsBridgeExtensionPath(): string {
   throw new Error('pi-acp: FS bridge extension not found (is the package built?)')
 }
 
+const MAX_UNIX_SOCKET_PATH_BYTES = 100
+
 function newSocketPath(): string {
   const name = `pi-acp-fs-${process.pid}-${crypto.randomUUID().slice(0, 8)}`
   if (process.platform === 'win32') return `\\\\.\\pipe\\${name}`
-  return join(tmpdir(), `${name}.sock`)
+
+  const socketName = `${name}.sock`
+  const preferredPath = join(tmpdir(), socketName)
+
+  // macOS limits Unix-domain socket paths to 104 bytes. Zed may provide a
+  // per-terminal TMPDIR long enough to exceed that limit.
+  return Buffer.byteLength(preferredPath) <= MAX_UNIX_SOCKET_PATH_BYTES ? preferredPath : join('/tmp', socketName)
 }
