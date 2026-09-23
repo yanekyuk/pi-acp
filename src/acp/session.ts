@@ -343,6 +343,11 @@ export class PiAcpSession {
   private bashToolCallIds = new Set<string>()
   private bashOutputSnapshots = new Map<string, string>()
 
+  private title: string | null = null
+  private isTitled = false
+  private isTitling = false
+  private lastUserMessage: string | null = null
+
   // Ensure `session/update` notifications are sent in order and can be awaited
   // before completing a `session/prompt` request.
   private lastEmit: Promise<void> = Promise.resolve()
@@ -396,6 +401,31 @@ export class PiAcpSession {
     this.startupInfoSent = false
   }
 
+  getTitle(): string | null {
+    return this.title
+  }
+
+  getIsTitled(): boolean {
+    return this.isTitled
+  }
+
+  getIsTitling(): boolean {
+    return this.isTitling
+  }
+
+  setIsTitling(value: boolean): void {
+    this.isTitling = value
+  }
+
+  setTitle(title: string): void {
+    this.title = title
+    this.isTitled = true
+  }
+
+  getLastUserMessage(): string | null {
+    return this.lastUserMessage
+  }
+
   /**
    * Best-effort attempt to send startup info outside of a prompt turn.
    * Some clients (e.g. Zed) may only render agent messages once the UI is ready;
@@ -418,6 +448,8 @@ export class PiAcpSession {
       await this.answerPendingChatInput(message)
       return 'end_turn'
     }
+
+    this.lastUserMessage = message
 
     // pi RPC mode disables slash command expansion, so we do it here.
     const expandedMessage = expandSlashCommand(message, this.fileCommands)
@@ -1070,6 +1102,7 @@ export class PiAcpSession {
     if (method === 'setTitle') {
       const title = stringProp(ev, 'title')
       if (title) {
+        this.setTitle(title)
         this.emit({
           sessionUpdate: 'session_info_update',
           title,

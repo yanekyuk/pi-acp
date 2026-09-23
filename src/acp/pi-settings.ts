@@ -73,3 +73,22 @@ export function getQuietStartup(cwd: string): boolean {
 
   return false
 }
+
+export function getAutoTitle(cwd: string): boolean {
+  const env = process.env.PI_AUTO_TITLE ?? process.env.PI_ACP_AUTO_TITLE
+  if (typeof env === 'string') {
+    const val = env.trim().toLowerCase()
+    if (val === '0' || val === 'false' || val === 'off' || val === 'no') return false
+    if (val === '1' || val === 'true' || val === 'on' || val === 'yes') return true
+  }
+
+  const merged = getMergedSettings(cwd)
+
+  const direct = merged.autoTitle
+  if (typeof direct === 'boolean') return direct
+
+  const legacy = merged.autoTitleGeneration
+  if (typeof legacy === 'boolean') return legacy
+
+  return true
+}

@@ -44,9 +44,10 @@ import {
 } from './translate/bash.js'
 import { promptToPiMessage } from './translate/prompt.js'
 import { loadSlashCommands, parseCommandArgs, toAvailableCommands } from './slash-commands.js'
-import { getAgentDir, getEnableSkillCommands, getQuietStartup } from './pi-settings.js'
+import { getAgentDir, getAutoTitle, getEnableSkillCommands, getQuietStartup } from './pi-settings.js'
 import { toAvailableCommandsFromPiGetCommands } from './pi-commands.js'
 import { maybeAuthRequiredError } from './auth-required.js'
+import { generateTitle } from './title.js'
 import { isAbsolute } from 'node:path'
 import { existsSync, readFileSync, realpathSync, readdirSync, statSync, unlinkSync } from 'node:fs'
 import type { AvailableCommand } from '@agentclientprotocol/sdk'
@@ -58,6 +59,10 @@ type AdvertisedModel = {
   modelId: string
   name: string
   description?: string | null
+}
+
+type PiAcpAgentOptions = {
+  titleGenerator?: typeof generateTitle
 }
 
 const MODEL_CONFIG_ID = 'model'
@@ -87,6 +92,15 @@ function builtinAvailableCommands(): AvailableCommand[] {
       name: 'name',
       description: 'Set session display name',
       input: { hint: '<name>' }
+    },
+    {
+      name: 'title',
+      description: 'Set or regenerate session title',
+      input: { hint: 'regenerate | <name>' }
+    },
+    {
+      name: 'regenerate-title',
+      description: 'Regenerate session title using AI'
     },
     {
       name: 'steering',
@@ -124,6 +138,7 @@ const pkg = readNearestPackageJson(import.meta.url)
 
 export class PiAcpAgent implements ACPAgent {
   private readonly conn: AgentSideConnection
+  private readonly titleGenerator: typeof generateTitle
   private readonly sessions = new SessionManager()
   private readonly store = new SessionStore()
   private readonly restoringSessions = new Map<string, Promise<PiAcpSession>>()
@@ -141,9 +156,9 @@ export class PiAcpAgent implements ACPAgent {
   // Client UI capabilities from initialize. Drives how pi extension dialogs are rendered.
   private clientUi: ClientUiCapabilities = { elicitationForm: false }
 
-  constructor(conn: AgentSideConnection, _config?: unknown) {
+  constructor(conn: AgentSideConnection, options: PiAcpAgentOptions = {}) {
     this.conn = conn
-    void _config
+    this.titleGenerator = options.titleGenerator ?? generateTitle
   }
 
   private cleanupFailedNewSession(sessionId: string, state?: any | null): void {
@@ -536,14 +551,25 @@ export class PiAcpAgent implements ACPAgent {
         return { stopReason: 'end_turn' }
       }
 
-      if (cmd === 'name') {
+      if (cmd === 'name' || cmd === 'title' || cmd === 'regenerate-title') {
+        if (
+          cmd === 'regenerate-title' ||
+          (cmd === 'title' && (args.length === 0 || args[0]?.toLowerCase() === 'regenerate'))
+        ) {
+          await this.generateAndApplySessionTitle(session, { notifyInChat: true })
+          return { stopReason: 'end_turn' }
+        }
+
         const name = args.join(' ').trim()
         if (!name) {
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
             update: {
               sessionUpdate: 'agent_message_chunk',
-              content: { type: 'text', text: 'Usage: /name <name>' }
+              content: {
+                type: 'text',
+                text: 'Usage: /name <name> (or /title regenerate to generate automatically)'
+              }
             }
           })
           return { stopReason: 'end_turn' }
@@ -566,6 +592,8 @@ export class PiAcpAgent implements ACPAgent {
           })
           return { stopReason: 'end_turn' }
         }
+
+        session.setTitle?.(name)
 
         await this.conn.sessionUpdate({
           sessionId: session.sessionId,
@@ -910,6 +938,17 @@ export class PiAcpAgent implements ACPAgent {
 
     const result = await session.prompt(message, images)
 
+    if (
+      !session.getIsTitled?.() &&
+      !session.getIsTitling?.() &&
+      getAutoTitle(session.cwd ?? '') &&
+      !images.length &&
+      message.trim() &&
+      !message.trimStart().startsWith('/')
+    ) {
+      void this.generateAndApplySessionTitle(session, { userMessage: message }).catch(() => {})
+    }
+
     // ACP StopReason does not include "error"; if pi fails we map to end_turn for now,
     // unless we know this was a cancellation.
     const stopReason: StopReason =
@@ -988,6 +1027,19 @@ export class PiAcpAgent implements ACPAgent {
       cwd: params.cwd,
       sessionFile: stored.sessionFile
     })
+
+    const existingTitle = findPiSession(params.sessionId)?.title ?? null
+    if (existingTitle) {
+      session.setTitle?.(existingTitle)
+      await this.conn.sessionUpdate({
+        sessionId: session.sessionId,
+        update: {
+          sessionUpdate: 'session_info_update',
+          title: existingTitle,
+          updatedAt: new Date().toISOString()
+        }
+      })
+    }
 
     // Replay full conversation history.
     const data = (await proc.getMessages()) as any
@@ -1193,6 +1245,115 @@ export class PiAcpAgent implements ACPAgent {
 
     const configOptions = await emitConfigOptionsUpdate(this.conn, session.sessionId, session.proc)
     return { configOptions }
+  }
+
+  async extMethod(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+    if (
+      method === 'session/regenerateTitle' ||
+      method === 'regenerateTitle' ||
+      method === 'regenerate_title' ||
+      method === 'title/regenerate'
+    ) {
+      const sessionId = typeof params?.sessionId === 'string' ? params.sessionId : undefined
+      if (!sessionId) {
+        throw RequestError.invalidParams('sessionId is required')
+      }
+      const session = await this.restoreSession(sessionId)
+      const title = await this.generateAndApplySessionTitle(session)
+      return { success: true, title }
+    }
+    throw RequestError.methodNotFound(method)
+  }
+
+  async extNotification(_method: string, _params: Record<string, unknown>): Promise<void> {
+    return
+  }
+
+  private async generateAndApplySessionTitle(
+    session: PiAcpSession,
+    opts?: { userMessage?: string; assistantMessage?: string; notifyInChat?: boolean }
+  ): Promise<string> {
+    session.setIsTitling?.(true)
+    try {
+      let userMessage = opts?.userMessage ?? session.getLastUserMessage?.() ?? ''
+      let assistantMessage = opts?.assistantMessage
+
+      if (!userMessage || assistantMessage === undefined) {
+        try {
+          const data = (await session.proc.getMessages()) as any
+          const messages: any[] = Array.isArray(data?.messages) ? data.messages : []
+
+          if (!userMessage) {
+            const firstUser = messages.find(m => m?.role === 'user')
+            if (firstUser) {
+              userMessage = normalizePiMessageText(firstUser.content)
+            }
+          }
+
+          if (assistantMessage === undefined) {
+            const lastAssistant = [...messages].reverse().find(m => m?.role === 'assistant')
+            if (lastAssistant) {
+              assistantMessage = normalizePiAssistantText(lastAssistant.content)
+            }
+          }
+        } catch {
+          // Title generation can proceed with whichever conversation context is available.
+        }
+      }
+
+      let model: string | undefined
+      try {
+        const state = (await session.proc.getState()) as any
+        const m = state?.model
+        if (m && typeof m === 'object') {
+          const provider = typeof m.provider === 'string' ? m.provider : ''
+          const id = typeof m.id === 'string' ? m.id : typeof m.modelId === 'string' ? m.modelId : ''
+          if (provider && id) model = `${provider}/${id}`
+          else if (id) model = id
+        }
+      } catch {
+        // ignore
+      }
+
+      const title = await this.titleGenerator({
+        userMessage,
+        assistantMessage,
+        cwd: session.cwd,
+        model,
+        piCommand: process.env.PI_ACP_PI_COMMAND
+      })
+
+      session.setTitle?.(title)
+
+      try {
+        await session.proc.setSessionName(title)
+      } catch {
+        // ignore if pi version doesn't support setSessionName
+      }
+
+      await this.conn.sessionUpdate({
+        sessionId: session.sessionId,
+        update: {
+          sessionUpdate: 'session_info_update',
+          title,
+          updatedAt: new Date().toISOString()
+        }
+      })
+
+      if (opts?.notifyInChat) {
+        await this.conn.sessionUpdate({
+          sessionId: session.sessionId,
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: `Session title set: ${title}` }
+          }
+        })
+      }
+
+      return title
+    } finally {
+      session.setIsTitling?.(false)
+    }
   }
 }
 
