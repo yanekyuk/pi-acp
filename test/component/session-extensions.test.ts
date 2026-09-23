@@ -222,16 +222,21 @@ test('PiAcpSession: displayed custom messages from extensions are surfaced as ag
     [
       {
         sessionUpdate: 'agent_message_chunk',
+        messageId: (conn.updates[0]!.update as any).messageId,
         content: { type: 'text', text: 'Run abc finished.' },
         _meta: { piAcp: { customMessage: { customType: 'subagent-notice' } } }
       },
       {
         sessionUpdate: 'agent_message_chunk',
+        messageId: (conn.updates[1]!.update as any).messageId,
         content: { type: 'text', text: 'part 1 part 2' },
         _meta: { piAcp: { customMessage: { customType: 'blocks' } } }
       }
     ]
   )
+  assert.equal(typeof (conn.updates[0]!.update as any).messageId, 'string')
+  assert.equal(typeof (conn.updates[1]!.update as any).messageId, 'string')
+  assert.notEqual((conn.updates[0]!.update as any).messageId, (conn.updates[1]!.update as any).messageId)
 })
 
 test('PiAcpSession: extension errors are surfaced as error-tagged agent text', async () => {
@@ -244,7 +249,9 @@ test('PiAcpSession: extension errors are surfaced as error-tagged agent text', a
 
   assert.deepEqual(conn.updates[0]!.update, {
     sessionUpdate: 'agent_message_chunk',
+    messageId: (conn.updates[0]!.update as any).messageId,
     content: { type: 'text', text: 'Pi extension error (command:mcp): boom' },
     _meta: { piAcp: { notify: { level: 'error' } } }
   })
+  assert.equal(typeof (conn.updates[0]!.update as any).messageId, 'string')
 })

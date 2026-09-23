@@ -27,6 +27,7 @@ import {
   type ResumeSessionResponse,
   type CloseSessionRequest,
   type CloseSessionResponse,
+  type ContentBlock,
   type McpServer
 } from '@agentclientprotocol/sdk'
 import { getAuthMethods } from './auth.js'
@@ -69,6 +70,15 @@ type AdvertisedModel = {
 
 type PiAcpAgentOptions = {
   titleGenerator?: typeof generateTitle
+}
+
+type SessionRestoreCancellation = {
+  cancelled: boolean
+}
+
+type SessionRestore = {
+  promise: Promise<PiAcpSession>
+  cancellation: SessionRestoreCancellation
 }
 
 const MODEL_CONFIG_ID = 'model'
@@ -147,9 +157,12 @@ export class PiAcpAgent implements ACPAgent {
   private readonly titleGenerator: typeof generateTitle
   private readonly sessions = new SessionManager()
   private readonly store = new SessionStore()
-  private readonly restoringSessions = new Map<string, Promise<PiAcpSession>>()
+  private readonly restoringSessions = new Map<string, SessionRestore>()
+  private disposed = false
 
   dispose(): void {
+    this.disposed = true
+    for (const restore of this.restoringSessions.values()) restore.cancellation.cancelled = true
     this.sessions.disposeAll()
   }
 
@@ -213,59 +226,79 @@ export class PiAcpAgent implements ACPAgent {
     sessionId: string,
     opts?: { cwd?: string; mcpServers?: McpServer[] }
   ): Promise<PiAcpSession> {
+    if (this.disposed) {
+      throw RequestError.invalidParams(`Agent is disposed; cannot restore session: ${sessionId}`)
+    }
+
     const existing = this.sessions.maybeGet(sessionId)
     if (existing) return existing
 
     const inFlight = this.restoringSessions.get(sessionId)
-    if (inFlight) return inFlight
+    if (inFlight) return inFlight.promise
 
-    const restorePromise = (async () => {
-      const stored = this.findStoredSession(sessionId)
-      if (!stored) {
-        throw RequestError.invalidParams(`Unknown sessionId: ${sessionId}`)
-      }
-
-      const cwd = opts?.cwd ?? stored.cwd
-
-      let proc: PiRpcProcess
-      try {
-        proc = await PiRpcProcess.spawn({
-          cwd,
-          sessionPath: stored.sessionFile,
-          piCommand: process.env.PI_ACP_PI_COMMAND,
-          clientFs: this.clientFs
-        })
-      } catch (e: any) {
-        if (e?.name === 'PiRpcSpawnError') {
-          throw RequestError.internalError({ code: e?.code }, String(e?.message ?? e))
-        }
-        throw e
-      }
-
-      const fileCommands = loadSlashCommands(cwd)
-      const session = this.sessions.getOrCreate(sessionId, {
-        cwd,
-        mcpServers: opts?.mcpServers ?? [],
-        conn: this.conn,
-        proc,
-        fileCommands,
-        clientUi: this.clientUi
-      })
-
-      if (stored.title) session.setTitle(stored.title)
-
-      this.store.upsert({ sessionId, cwd, sessionFile: stored.sessionFile })
-
-      return session
-    })()
-
-    this.restoringSessions.set(sessionId, restorePromise)
+    const cancellation: SessionRestoreCancellation = { cancelled: false }
+    const restore: SessionRestore = {
+      promise: this.spawnRestoredSession(sessionId, opts, cancellation),
+      cancellation
+    }
+    this.restoringSessions.set(sessionId, restore)
 
     try {
-      return await restorePromise
+      return await restore.promise
     } finally {
-      this.restoringSessions.delete(sessionId)
+      if (this.restoringSessions.get(sessionId) === restore) {
+        this.restoringSessions.delete(sessionId)
+      }
     }
+  }
+
+  private async spawnRestoredSession(
+    sessionId: string,
+    opts: { cwd?: string; mcpServers?: McpServer[] } | undefined,
+    cancellation: SessionRestoreCancellation
+  ): Promise<PiAcpSession> {
+    const stored = this.findStoredSession(sessionId)
+    if (!stored) {
+      throw RequestError.invalidParams(`Unknown sessionId: ${sessionId}`)
+    }
+
+    const cwd = opts?.cwd ?? stored.cwd
+
+    let proc: PiRpcProcess
+    try {
+      proc = await PiRpcProcess.spawn({
+        cwd,
+        sessionPath: stored.sessionFile,
+        piCommand: process.env.PI_ACP_PI_COMMAND,
+        clientFs: this.clientFs
+      })
+    } catch (e: any) {
+      if (e?.name === 'PiRpcSpawnError') {
+        throw RequestError.internalError({ code: e?.code }, String(e?.message ?? e))
+      }
+      throw e
+    }
+
+    if (cancellation.cancelled || this.disposed) {
+      proc.dispose()
+      throw RequestError.requestCancelled({ sessionId }, `Session restore was cancelled: ${sessionId}`)
+    }
+
+    const fileCommands = loadSlashCommands(cwd)
+    const session = this.sessions.getOrCreate(sessionId, {
+      cwd,
+      mcpServers: opts?.mcpServers ?? [],
+      conn: this.conn,
+      proc,
+      fileCommands,
+      clientUi: this.clientUi
+    })
+
+    if (stored.title) session.setTitle(stored.title)
+
+    this.store.upsert({ sessionId, cwd, sessionFile: stored.sessionFile })
+
+    return session
   }
 
   async initialize(params: InitializeRequest): Promise<InitializeResponse> {
@@ -465,6 +498,22 @@ export class PiAcpAgent implements ACPAgent {
     })
   }
 
+  private async sendSyntheticAgentMessage(
+    sessionId: string,
+    content: ContentBlock,
+    messageId: string = crypto.randomUUID()
+  ): Promise<string> {
+    await this.conn.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        messageId,
+        content
+      }
+    })
+    return messageId
+  }
+
   async authenticate(_params: AuthenticateRequest) {
     // Terminal Auth is handled out-of-band by re-launching the binary with `--terminal-login`.
     // If the client calls `authenticate` anyway, we can no-op successfully.
@@ -500,13 +549,7 @@ export class PiAcpAgent implements ACPAgent {
 
         const text = headerLines.join('\n') + (summary ? `\n\n${summary}` : '')
 
-        await this.conn.sessionUpdate({
-          sessionId: session.sessionId,
-          update: {
-            sessionUpdate: 'agent_message_chunk',
-            content: { type: 'text', text }
-          }
-        })
+        await this.sendSyntheticAgentMessage(session.sessionId, { type: 'text', text })
         await session.emitUsageUpdate?.(
           typeof r?.estimatedTokensAfter === 'number' ? r.estimatedTokensAfter : undefined
         )
@@ -538,13 +581,7 @@ export class PiAcpAgent implements ACPAgent {
         // Fallback if stats shape changes.
         const text = lines.length ? lines.join('\n') : `Session stats:\n${JSON.stringify(stats, null, 2)}`
 
-        await this.conn.sessionUpdate({
-          sessionId: session.sessionId,
-          update: {
-            sessionUpdate: 'agent_message_chunk',
-            content: { type: 'text', text }
-          }
-        })
+        await this.sendSyntheticAgentMessage(session.sessionId, { type: 'text', text })
 
         return { stopReason: 'end_turn' }
       }
@@ -560,15 +597,9 @@ export class PiAcpAgent implements ACPAgent {
 
         const name = args.join(' ').trim()
         if (!name) {
-          await this.conn.sessionUpdate({
-            sessionId: session.sessionId,
-            update: {
-              sessionUpdate: 'agent_message_chunk',
-              content: {
-                type: 'text',
-                text: 'Usage: /name <name> (or /title regenerate to generate automatically)'
-              }
-            }
+          await this.sendSyntheticAgentMessage(session.sessionId, {
+            type: 'text',
+            text: 'Usage: /name <name> (or /title regenerate to generate automatically)'
           })
           return { stopReason: 'end_turn' }
         }
@@ -581,12 +612,9 @@ export class PiAcpAgent implements ACPAgent {
             ? ' This requires a newer pi version that supports `set_session_name` in RPC mode.'
             : ''
 
-          await this.conn.sessionUpdate({
-            sessionId: session.sessionId,
-            update: {
-              sessionUpdate: 'agent_message_chunk',
-              content: { type: 'text', text: `Failed to set session name: ${msg}${hint}` }
-            }
+          await this.sendSyntheticAgentMessage(session.sessionId, {
+            type: 'text',
+            text: `Failed to set session name: ${msg}${hint}`
           })
           return { stopReason: 'end_turn' }
         }
@@ -602,12 +630,9 @@ export class PiAcpAgent implements ACPAgent {
           }
         })
 
-        await this.conn.sessionUpdate({
-          sessionId: session.sessionId,
-          update: {
-            sessionUpdate: 'agent_message_chunk',
-            content: { type: 'text', text: `Session name set: ${name}` }
-          }
+        await this.sendSyntheticAgentMessage(session.sessionId, {
+          type: 'text',
+          text: `Session name set: ${name}`
         })
 
         return { stopReason: 'end_turn' }
@@ -620,41 +645,26 @@ export class PiAcpAgent implements ACPAgent {
 
         // If no arg, just report current.
         if (!modeRaw) {
-          await this.conn.sessionUpdate({
-            sessionId: session.sessionId,
-            update: {
-              sessionUpdate: 'agent_message_chunk',
-              content: {
-                type: 'text',
-                text: `Steering mode: ${current || 'unknown'}`
-              }
-            }
+          await this.sendSyntheticAgentMessage(session.sessionId, {
+            type: 'text',
+            text: `Steering mode: ${current || 'unknown'}`
           })
           return { stopReason: 'end_turn' }
         }
 
         if (modeRaw !== 'all' && modeRaw !== 'one-at-a-time') {
-          await this.conn.sessionUpdate({
-            sessionId: session.sessionId,
-            update: {
-              sessionUpdate: 'agent_message_chunk',
-              content: {
-                type: 'text',
-                text: 'Usage: /steering all | /steering one-at-a-time'
-              }
-            }
+          await this.sendSyntheticAgentMessage(session.sessionId, {
+            type: 'text',
+            text: 'Usage: /steering all | /steering one-at-a-time'
           })
           return { stopReason: 'end_turn' }
         }
 
         await session.proc.setSteeringMode(modeRaw as 'all' | 'one-at-a-time')
 
-        await this.conn.sessionUpdate({
-          sessionId: session.sessionId,
-          update: {
-            sessionUpdate: 'agent_message_chunk',
-            content: { type: 'text', text: `Steering mode set to: ${modeRaw}` }
-          }
+        await this.sendSyntheticAgentMessage(session.sessionId, {
+          type: 'text',
+          text: `Steering mode set to: ${modeRaw}`
         })
 
         return { stopReason: 'end_turn' }
@@ -667,41 +677,26 @@ export class PiAcpAgent implements ACPAgent {
 
         // If no arg, just report current.
         if (!modeRaw) {
-          await this.conn.sessionUpdate({
-            sessionId: session.sessionId,
-            update: {
-              sessionUpdate: 'agent_message_chunk',
-              content: {
-                type: 'text',
-                text: `Follow-up mode: ${current || 'unknown'}`
-              }
-            }
+          await this.sendSyntheticAgentMessage(session.sessionId, {
+            type: 'text',
+            text: `Follow-up mode: ${current || 'unknown'}`
           })
           return { stopReason: 'end_turn' }
         }
 
         if (modeRaw !== 'all' && modeRaw !== 'one-at-a-time') {
-          await this.conn.sessionUpdate({
-            sessionId: session.sessionId,
-            update: {
-              sessionUpdate: 'agent_message_chunk',
-              content: {
-                type: 'text',
-                text: 'Usage: /follow-up all | /follow-up one-at-a-time'
-              }
-            }
+          await this.sendSyntheticAgentMessage(session.sessionId, {
+            type: 'text',
+            text: 'Usage: /follow-up all | /follow-up one-at-a-time'
           })
           return { stopReason: 'end_turn' }
         }
 
         await session.proc.setFollowUpMode(modeRaw as 'all' | 'one-at-a-time')
 
-        await this.conn.sessionUpdate({
-          sessionId: session.sessionId,
-          update: {
-            sessionUpdate: 'agent_message_chunk',
-            content: { type: 'text', text: `Follow-up mode set to: ${modeRaw}` }
-          }
+        await this.sendSyntheticAgentMessage(session.sessionId, {
+          type: 'text',
+          text: `Follow-up mode set to: ${modeRaw}`
         })
 
         return { stopReason: 'end_turn' }
@@ -746,12 +741,9 @@ export class PiAcpAgent implements ACPAgent {
 
         const changelogPath = findChangelog()
         if (!changelogPath) {
-          await this.conn.sessionUpdate({
-            sessionId: session.sessionId,
-            update: {
-              sessionUpdate: 'agent_message_chunk',
-              content: { type: 'text', text: "Changelog not found (couldn't locate pi installation)." }
-            }
+          await this.sendSyntheticAgentMessage(session.sessionId, {
+            type: 'text',
+            text: "Changelog not found (couldn't locate pi installation)."
           })
           return { stopReason: 'end_turn' }
         }
@@ -760,12 +752,9 @@ export class PiAcpAgent implements ACPAgent {
         try {
           text = readFileSync(changelogPath, 'utf-8')
         } catch (e: any) {
-          await this.conn.sessionUpdate({
-            sessionId: session.sessionId,
-            update: {
-              sessionUpdate: 'agent_message_chunk',
-              content: { type: 'text', text: `Failed to read changelog: ${String(e?.message ?? e)}` }
-            }
+          await this.sendSyntheticAgentMessage(session.sessionId, {
+            type: 'text',
+            text: `Failed to read changelog: ${String(e?.message ?? e)}`
           })
           return { stopReason: 'end_turn' }
         }
@@ -774,13 +763,7 @@ export class PiAcpAgent implements ACPAgent {
         const maxChars = 20_000
         if (text.length > maxChars) text = text.slice(0, maxChars) + '\n\n...(truncated)...'
 
-        await this.conn.sessionUpdate({
-          sessionId: session.sessionId,
-          update: {
-            sessionUpdate: 'agent_message_chunk',
-            content: { type: 'text', text }
-          }
-        })
+        await this.sendSyntheticAgentMessage(session.sessionId, { type: 'text', text })
 
         return { stopReason: 'end_turn' }
       }
@@ -795,15 +778,9 @@ export class PiAcpAgent implements ACPAgent {
         const messageCount = typeof state?.messageCount === 'number' ? state.messageCount : 0
 
         if (!sessionFile || messageCount === 0 || !existsSync(sessionFile)) {
-          await this.conn.sessionUpdate({
-            sessionId: session.sessionId,
-            update: {
-              sessionUpdate: 'agent_message_chunk',
-              content: {
-                type: 'text',
-                text: 'Nothing to export yet (no session messages). Send a prompt first.'
-              }
-            }
+          await this.sendSyntheticAgentMessage(session.sessionId, {
+            type: 'text',
+            text: 'Nothing to export yet (no session messages). Send a prompt first.'
           })
           return { stopReason: 'end_turn' }
         }
@@ -811,28 +788,16 @@ export class PiAcpAgent implements ACPAgent {
         try {
           const raw = readFileSync(sessionFile, 'utf-8')
           if (raw.trim().length === 0) {
-            await this.conn.sessionUpdate({
-              sessionId: session.sessionId,
-              update: {
-                sessionUpdate: 'agent_message_chunk',
-                content: {
-                  type: 'text',
-                  text: 'Nothing to export yet (empty session file). Send a prompt first.'
-                }
-              }
+            await this.sendSyntheticAgentMessage(session.sessionId, {
+              type: 'text',
+              text: 'Nothing to export yet (empty session file). Send a prompt first.'
             })
             return { stopReason: 'end_turn' }
           }
         } catch {
-          await this.conn.sessionUpdate({
-            sessionId: session.sessionId,
-            update: {
-              sessionUpdate: 'agent_message_chunk',
-              content: {
-                type: 'text',
-                text: "Couldn't read session file for export. Try sending a prompt first."
-              }
-            }
+          await this.sendSyntheticAgentMessage(session.sessionId, {
+            type: 'text',
+            text: "Couldn't read session file for export. Try sending a prompt first."
           })
           return { stopReason: 'end_turn' }
         }
@@ -845,61 +810,40 @@ export class PiAcpAgent implements ACPAgent {
           const result = await session.proc.exportHtml(outputPath)
           resultPath = result.path
         } catch (e: any) {
-          await this.conn.sessionUpdate({
-            sessionId: session.sessionId,
-            update: {
-              sessionUpdate: 'agent_message_chunk',
-              content: {
-                type: 'text',
-                text: `Export failed: ${String(e?.message ?? e)}`
-              }
-            }
+          await this.sendSyntheticAgentMessage(session.sessionId, {
+            type: 'text',
+            text: `Export failed: ${String(e?.message ?? e)}`
           })
           return { stopReason: 'end_turn' }
         }
 
         if (!resultPath) {
-          await this.conn.sessionUpdate({
-            sessionId: session.sessionId,
-            update: {
-              sessionUpdate: 'agent_message_chunk',
-              content: {
-                type: 'text',
-                text: 'Export failed: no output path returned by pi.'
-              }
-            }
+          await this.sendSyntheticAgentMessage(session.sessionId, {
+            type: 'text',
+            text: 'Export failed: no output path returned by pi.'
           })
           return { stopReason: 'end_turn' }
         }
 
         const uri = `file://${resultPath}`
 
-        // Emit a short prefix + a resource link. Many clients concatenate chunks into a single
-        // assistant message, so this avoids the "link + duplicate plain text" look.
-        await this.conn.sessionUpdate({
-          sessionId: session.sessionId,
-          update: {
-            sessionUpdate: 'agent_message_chunk',
-            content: {
-              type: 'text',
-              text: 'Session exported: '
-            }
-          }
+        // Emit a short prefix + a resource link as chunks of one assistant message.
+        const messageId = await this.sendSyntheticAgentMessage(session.sessionId, {
+          type: 'text',
+          text: 'Session exported: '
         })
 
-        await this.conn.sessionUpdate({
-          sessionId: session.sessionId,
-          update: {
-            sessionUpdate: 'agent_message_chunk',
-            content: {
-              type: 'resource_link',
-              name: `pi-session-${safeSessionId}.html`,
-              uri,
-              mimeType: 'text/html',
-              title: 'Session exported'
-            }
-          }
-        })
+        await this.sendSyntheticAgentMessage(
+          session.sessionId,
+          {
+            type: 'resource_link',
+            name: `pi-session-${safeSessionId}.html`,
+            uri,
+            mimeType: 'text/html',
+            title: 'Session exported'
+          },
+          messageId
+        )
 
         return { stopReason: 'end_turn' }
       }
@@ -919,15 +863,9 @@ export class PiAcpAgent implements ACPAgent {
 
         await session.proc.setAutoCompaction(enabled)
 
-        await this.conn.sessionUpdate({
-          sessionId: session.sessionId,
-          update: {
-            sessionUpdate: 'agent_message_chunk',
-            content: {
-              type: 'text',
-              text: `Auto-compaction ${enabled ? 'enabled' : 'disabled'}.`
-            }
-          }
+        await this.sendSyntheticAgentMessage(session.sessionId, {
+          type: 'text',
+          text: `Auto-compaction ${enabled ? 'enabled' : 'disabled'}.`
         })
 
         return { stopReason: 'end_turn' }
@@ -1216,8 +1154,14 @@ export class PiAcpAgent implements ACPAgent {
   }
 
   private async closeActiveSession(sessionId: string): Promise<boolean> {
+    const restore = this.restoringSessions.get(sessionId)
+    if (restore) {
+      restore.cancellation.cancelled = true
+      await restore.promise.catch(() => {})
+    }
+
     const session = this.sessions.maybeGet(sessionId)
-    if (!session) return false
+    if (!session) return Boolean(restore)
 
     try {
       await session.cancel()
@@ -1379,12 +1323,9 @@ export class PiAcpAgent implements ACPAgent {
       })
 
       if (opts?.notifyInChat) {
-        await this.conn.sessionUpdate({
-          sessionId: session.sessionId,
-          update: {
-            sessionUpdate: 'agent_message_chunk',
-            content: { type: 'text', text: `Session title set: ${title}` }
-          }
+        await this.sendSyntheticAgentMessage(session.sessionId, {
+          type: 'text',
+          text: `Session title set: ${title}`
         })
       }
 

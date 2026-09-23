@@ -356,6 +356,9 @@ export class PiAcpSession {
   // Ensure `session/update` notifications are sent in order and can be awaited
   // before completing a `session/prompt` request.
   private lastEmit: Promise<void> = Promise.resolve()
+  // Serialize the stats read as well as delivery so a slower, older refresh cannot
+  // overwrite usage from a newer lifecycle event.
+  private lastUsageRefresh: Promise<void> = Promise.resolve()
 
   constructor(opts: {
     sessionId: string
@@ -440,10 +443,7 @@ export class PiAcpSession {
     if (this.startupInfoSent || !this.startupInfo) return
     this.startupInfoSent = true
 
-    this.emit({
-      sessionUpdate: 'agent_message_chunk',
-      content: { type: 'text', text: this.startupInfo }
-    })
+    this.emitSyntheticAgentMessage({ type: 'text', text: this.startupInfo })
   }
 
   async prompt(message: string, images: unknown[] = []): Promise<StopReason> {
@@ -469,12 +469,9 @@ export class PiAcpSession {
 
         // Best-effort: notify client that a prompt was queued.
         // This doesn't work in Zed yet, needs to be revisited
-        this.emit({
-          sessionUpdate: 'agent_message_chunk',
-          content: {
-            type: 'text',
-            text: `Queued message (position ${this.turnQueue.length}).`
-          }
+        this.emitSyntheticAgentMessage({
+          type: 'text',
+          text: `Queued message (position ${this.turnQueue.length}).`
         })
 
         // Also publish queue depth via session info metadata.
@@ -504,10 +501,7 @@ export class PiAcpSession {
       const queued = this.turnQueue.splice(0, this.turnQueue.length)
       for (const t of queued) t.resolve('cancelled')
 
-      this.emit({
-        sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: 'Cleared queued prompts.' }
-      })
+      this.emitSyntheticAgentMessage({ type: 'text', text: 'Cleared queued prompts.' })
       this.emit({
         sessionUpdate: 'session_info_update',
         _meta: { piAcp: { queueDepth: 0, running: Boolean(this.pendingTurn) } }
@@ -522,17 +516,35 @@ export class PiAcpSession {
     return this.cancelRequested
   }
 
-  async emitUsageUpdate(fallbackUsed?: number): Promise<void> {
-    try {
-      const stats = await this.proc.getSessionStats()
-      const usage = sessionStatsToUsageUpdate(stats, fallbackUsed)
-      if (!usage) return
+  emitUsageUpdate(fallbackUsed?: number): Promise<void> {
+    this.lastUsageRefresh = this.lastUsageRefresh.then(async () => {
+      try {
+        const stats = await this.proc.getSessionStats()
+        const usage = sessionStatsToUsageUpdate(stats, fallbackUsed)
+        if (!usage) return
 
-      this.emit({ sessionUpdate: 'usage_update', ...usage })
-      await this.flushEmits()
-    } catch {
-      // Usage is advisory and must not fail session lifecycle or prompt requests.
-    }
+        this.emit({ sessionUpdate: 'usage_update', ...usage })
+        await this.flushEmits()
+      } catch {
+        // Usage is advisory and must not fail session lifecycle or prompt requests.
+      }
+    })
+
+    return this.lastUsageRefresh
+  }
+
+  private emitSyntheticAgentMessage(
+    content: ContentBlock,
+    meta?: Record<string, unknown>,
+    messageId = crypto.randomUUID()
+  ): string {
+    this.emit({
+      sessionUpdate: 'agent_message_chunk',
+      messageId,
+      content,
+      ...(meta ? { _meta: meta } : {})
+    })
+    return messageId
   }
 
   private emit(update: SessionUpdate): void {
@@ -692,9 +704,9 @@ export class PiAcpSession {
 
       const next = this.turnQueue.shift()
       if (next) {
-        this.emit({
-          sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text: `Starting queued message. (${this.turnQueue.length} remaining)` }
+        this.emitSyntheticAgentMessage({
+          type: 'text',
+          text: `Starting queued message. (${this.turnQueue.length} remaining)`
         })
         this.startTurn(next)
       } else {
@@ -1007,39 +1019,27 @@ export class PiAcpSession {
       }
 
       case 'auto_retry_start': {
-        this.emit({
-          sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text: formatAutoRetryMessage(ev) } satisfies ContentBlock
-        })
+        this.emitSyntheticAgentMessage({ type: 'text', text: formatAutoRetryMessage(ev) })
         break
       }
 
       case 'auto_retry_end': {
-        this.emit({
-          sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text: 'Retry finished, resuming.' } satisfies ContentBlock
-        })
+        this.emitSyntheticAgentMessage({ type: 'text', text: 'Retry finished, resuming.' })
         break
       }
 
       case 'auto_compaction_start': {
-        this.emit({
-          sessionUpdate: 'agent_message_chunk',
-          content: {
-            type: 'text',
-            text: 'Context nearing limit, running automatic compaction...'
-          } satisfies ContentBlock
+        this.emitSyntheticAgentMessage({
+          type: 'text',
+          text: 'Context nearing limit, running automatic compaction...'
         })
         break
       }
 
       case 'auto_compaction_end': {
-        this.emit({
-          sessionUpdate: 'agent_message_chunk',
-          content: {
-            type: 'text',
-            text: 'Automatic compaction finished; context was summarized to continue the session.'
-          } satisfies ContentBlock
+        this.emitSyntheticAgentMessage({
+          type: 'text',
+          text: 'Automatic compaction finished; context was summarized to continue the session.'
         })
         const estimatedTokensAfter = Number((ev as any).result?.estimatedTokensAfter)
         void this.emitUsageUpdate(Number.isFinite(estimatedTokensAfter) ? estimatedTokensAfter : undefined)
@@ -1085,22 +1085,20 @@ export class PiAcpSession {
         const text = customMessageText(message.content)
         if (!text) break
 
-        this.emit({
-          sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text } satisfies ContentBlock,
-          _meta: { piAcp: { customMessage: { customType: String(message.customType ?? '') } } }
-        })
+        this.emitSyntheticAgentMessage(
+          { type: 'text', text },
+          { piAcp: { customMessage: { customType: String(message.customType ?? '') } } }
+        )
         break
       }
 
       case 'extension_error': {
         const extensionPath = String((ev as any).extensionPath ?? 'extension')
         const error = String((ev as any).error ?? 'unknown error')
-        this.emit({
-          sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text: `Pi extension error (${extensionPath}): ${error}` } satisfies ContentBlock,
-          _meta: { piAcp: { notify: { level: 'error' } } }
-        })
+        this.emitSyntheticAgentMessage(
+          { type: 'text', text: `Pi extension error (${extensionPath}): ${error}` },
+          { piAcp: { notify: { level: 'error' } } }
+        )
         break
       }
 
@@ -1132,11 +1130,10 @@ export class PiAcpSession {
     }
 
     if (method === 'notify') {
-      this.emit({
-        sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: stringProp(ev, 'message') ?? 'Pi notification' } satisfies ContentBlock,
-        _meta: { piAcp: { notify: { level: stringProp(ev, 'notifyType') ?? 'info' } } }
-      })
+      this.emitSyntheticAgentMessage(
+        { type: 'text', text: stringProp(ev, 'message') ?? 'Pi notification' },
+        { piAcp: { notify: { level: stringProp(ev, 'notifyType') ?? 'info' } } }
+      )
       return
     }
 
@@ -1210,11 +1207,10 @@ export class PiAcpSession {
     this.pendingChatInput = { id, method }
     if (superseded) await this.proc.sendExtensionUiResponse({ id: superseded.id, cancelled: true }).catch(() => {})
 
-    this.emit({
-      sessionUpdate: 'agent_message_chunk',
-      content: { type: 'text', text: formatChatInputPrompt(ev, method) } satisfies ContentBlock,
-      _meta: { piAcp: { inputRequest: { id, method } } }
-    })
+    this.emitSyntheticAgentMessage(
+      { type: 'text', text: formatChatInputPrompt(ev, method) },
+      { piAcp: { inputRequest: { id, method } } }
+    )
   }
 
   private async answerPendingChatInput(value: string): Promise<void> {

@@ -6,6 +6,21 @@ import { join } from 'node:path'
 import { PiAcpSession } from '../../src/acp/session.js'
 import { FakeAgentSideConnection, FakePiRpcProcess, asAgentConn } from '../helpers/fakes.js'
 
+function syntheticMessageId(update: any): string {
+  assert.equal(update.sessionUpdate, 'agent_message_chunk')
+  assert.equal(typeof update.messageId, 'string')
+  assert.notEqual(update.messageId, '')
+  return update.messageId
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>(resolvePromise => {
+    resolve = resolvePromise
+  })
+  return { promise, resolve }
+}
+
 test('PiAcpSession: emits agent_message_chunk for text_delta', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
@@ -386,6 +401,7 @@ test('PiAcpSession: emits agent_message_chunk for auto_retry_start with attempt/
   assert.equal(conn.updates.length, 1)
   assert.deepEqual(conn.updates[0]!.update, {
     sessionUpdate: 'agent_message_chunk',
+    messageId: syntheticMessageId(conn.updates[0]!.update),
     content: { type: 'text', text: 'Retrying (attempt 2/5, waiting 2s)...' }
   })
 })
@@ -410,6 +426,7 @@ test('PiAcpSession: formats a positive sub-second auto_retry_start delay as wait
   assert.equal(conn.updates.length, 1)
   assert.deepEqual(conn.updates[0]!.update, {
     sessionUpdate: 'agent_message_chunk',
+    messageId: syntheticMessageId(conn.updates[0]!.update),
     content: { type: 'text', text: 'Retrying (attempt 1/3, waiting 1s)...' }
   })
 })
@@ -434,6 +451,7 @@ test('PiAcpSession: falls back to a generic retry message when auto_retry_start 
   assert.equal(conn.updates.length, 1)
   assert.deepEqual(conn.updates[0]!.update, {
     sessionUpdate: 'agent_message_chunk',
+    messageId: syntheticMessageId(conn.updates[0]!.update),
     content: { type: 'text', text: 'Retrying...' }
   })
 })
@@ -487,6 +505,7 @@ test('PiAcpSession: emits agent_message_chunk for auto_retry_end', async () => {
   assert.equal(conn.updates.length, 1)
   assert.deepEqual(conn.updates[0]!.update, {
     sessionUpdate: 'agent_message_chunk',
+    messageId: syntheticMessageId(conn.updates[0]!.update),
     content: { type: 'text', text: 'Retry finished, resuming.' }
   })
 })
@@ -511,6 +530,7 @@ test('PiAcpSession: emits agent_message_chunk for auto_compaction_start', async 
   assert.equal(conn.updates.length, 1)
   assert.deepEqual(conn.updates[0]!.update, {
     sessionUpdate: 'agent_message_chunk',
+    messageId: syntheticMessageId(conn.updates[0]!.update),
     content: { type: 'text', text: 'Context nearing limit, running automatic compaction...' }
   })
 })
@@ -541,6 +561,7 @@ test('PiAcpSession: emits agent_message_chunk for auto_compaction_end', async ()
     [
       {
         sessionUpdate: 'agent_message_chunk',
+        messageId: syntheticMessageId(conn.updates[0]!.update),
         content: {
           type: 'text',
           text: 'Automatic compaction finished; context was summarized to continue the session.'
@@ -554,6 +575,116 @@ test('PiAcpSession: emits agent_message_chunk for auto_compaction_end', async ()
       }
     ]
   )
+})
+
+test('PiAcpSession: serializes compaction and final usage refreshes before completing the prompt', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  const compactionStats = deferred<any>()
+  const finalStats = deferred<any>()
+  let statsCalls = 0
+
+  proc.getSessionStats = () => {
+    statsCalls += 1
+    return statsCalls === 1 ? compactionStats.promise : finalStats.promise
+  }
+
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  let updatesAtPromptResolution = -1
+  const prompt = session.prompt('continue').then(reason => {
+    updatesAtPromptResolution = conn.updates.length
+    return reason
+  })
+
+  proc.emit({ type: 'auto_compaction_end', result: { estimatedTokensAfter: 4_000 } } as any)
+  proc.emit({ type: 'agent_settled' })
+  await new Promise(resolve => setTimeout(resolve, 0))
+
+  assert.equal(statsCalls, 1)
+
+  compactionStats.resolve({
+    cost: 0.25,
+    contextUsage: { tokens: null, contextWindow: 128_000 }
+  })
+  await new Promise(resolve => setTimeout(resolve, 0))
+
+  assert.equal(statsCalls, 2)
+
+  finalStats.resolve({
+    cost: 0.3,
+    contextUsage: { tokens: 3_500, contextWindow: 128_000 }
+  })
+
+  assert.equal(await prompt, 'end_turn')
+
+  const usageUpdates = conn.updates.filter(entry => entry.update.sessionUpdate === 'usage_update')
+  assert.deepEqual(
+    usageUpdates.map(entry => entry.update),
+    [
+      {
+        sessionUpdate: 'usage_update',
+        used: 4_000,
+        size: 128_000,
+        cost: { amount: 0.25, currency: 'USD' }
+      },
+      {
+        sessionUpdate: 'usage_update',
+        used: 3_500,
+        size: 128_000,
+        cost: { amount: 0.3, currency: 'USD' }
+      }
+    ]
+  )
+  assert.ok(conn.updates.indexOf(usageUpdates[1]!) < updatesAtPromptResolution)
+})
+
+test('PiAcpSession: gives adjacent startup, retry, and compaction notices separate message IDs', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  session.setStartupInfo('Startup notice')
+  session.sendStartupInfoIfPending()
+  proc.emit({ type: 'message_start', message: { role: 'assistant', id: 'provider-message' } })
+  proc.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'before' } })
+  proc.emit({ type: 'auto_retry_start', attempt: 1, maxAttempts: 2, delayMs: 1000 } as any)
+  proc.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'after' } })
+  proc.emit({ type: 'auto_compaction_start' } as any)
+  proc.emit({ type: 'auto_compaction_end', result: { estimatedTokensAfter: 4_000 } } as any)
+
+  await new Promise(resolve => setTimeout(resolve, 0))
+
+  const messages = conn.updates
+    .map(entry => entry.update)
+    .filter(update => update.sessionUpdate === 'agent_message_chunk')
+  const ids = messages.map(update => update.messageId)
+
+  assert.equal(messages.length, 6)
+  assert.equal(ids[1], 'provider-message')
+  assert.equal(ids[3], 'provider-message')
+
+  const syntheticIds = [ids[0], ids[2], ids[4], ids[5]]
+  for (const id of syntheticIds) {
+    assert.equal(typeof id, 'string')
+    assert.notEqual(id, '')
+    assert.notEqual(id, 'provider-message')
+  }
+  assert.equal(new Set(syntheticIds).size, syntheticIds.length)
 })
 
 test('PiAcpSession: preserves ordering when auto_retry_start is interleaved with text_delta events', async () => {
@@ -586,6 +717,7 @@ test('PiAcpSession: preserves ordering when auto_retry_start is interleaved with
       },
       {
         sessionUpdate: 'agent_message_chunk',
+        messageId: syntheticMessageId(conn.updates[1]!.update),
         content: { type: 'text', text: 'Retrying (attempt 1/2, waiting 2s)...' }
       },
       {
@@ -595,6 +727,7 @@ test('PiAcpSession: preserves ordering when auto_retry_start is interleaved with
       }
     ]
   )
+  assert.notEqual((conn.updates[1]!.update as any).messageId, 'assistant-1')
 })
 
 test('PiAcpSession: emits streamed tool locations from pi path args', async () => {
@@ -988,6 +1121,7 @@ test('PiAcpSession: tags extension notify chunks with severity in _meta', async 
   assert.equal(conn.updates.length, 1)
   assert.deepEqual(conn.updates[0]!.update, {
     sessionUpdate: 'agent_message_chunk',
+    messageId: syntheticMessageId(conn.updates[0]!.update),
     content: { type: 'text', text: 'MCP: connection failed' },
     _meta: { piAcp: { notify: { level: 'error' } } }
   })

@@ -30,6 +30,7 @@ test('PiAcpAgent: /steering is handled adapter-side', async () => {
   assert.equal(proc.prompts.length, 0)
   const last = conn.updates.at(-1)
   assert.match((last as any).update.content.text, /Steering mode: one-at-a-time/)
+  assert.equal(typeof (last as any).update.messageId, 'string')
 })
 
 test('PiAcpAgent: /name sets session display name adapter-side', async () => {
@@ -57,4 +58,5 @@ test('PiAcpAgent: /name sets session display name adapter-side', async () => {
 
   const last = conn.updates.at(-1)
   assert.match((last as any).update.content.text, /Session name set: My Session/)
+  assert.equal(typeof (last as any).update.messageId, 'string')
 })
