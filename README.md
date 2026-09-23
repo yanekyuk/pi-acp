@@ -23,6 +23,7 @@ Expect some minor breaking changes. The adapter targets stable ACP v1 using `@ag
   - Relative file paths from pi are resolved against the session cwd before being emitted as ACP tool locations, which enables follow-along features in clients like Zed
   - For `edit`, `pi-acp` attempts to infer a 1-based line number from a unique `oldText` match in the pre-edit file snapshot and includes it in the emitted tool location when possible
   - Tool calls include their stable programmatic `name`
+  - Pi image results are preserved as ACP image content, and verified saved artifacts are exposed as `file://` resource links
   - For `edit`, `pi-acp` snapshots the file before the tool runs and emits an ACP **structured diff** (`oldText`/`newText`) with an absolute path on completion when possible
 - ACP filesystem delegation (`fs/read_text_file`, `fs/write_text_file`)
   - When the client advertises `fs.writeTextFile`, `pi-acp` loads a small pi extension (`dist/acp-fs-extension.js`) that overrides pi's built-in `read`/`edit`/`write` tools and routes file contents through the ACP client over a local socket. This is what makes editors like Zed list the files edited by the session (Keep All / Reject All), edit against unsaved buffer contents, and follow the agent's location. If the client rejects an operation (e.g. a path outside the open project), the tool falls back to the local filesystem.
@@ -51,8 +52,8 @@ Make sure pi is installed
 npm install -g @earendil-works/pi-coding-agent
 ```
 
-- Node.js 22+
-- `pi` v0.80.4+ installed and available on your `PATH` (the adapter runs the `pi` executable)
+- Node.js 22.19+
+- `pi` v0.84.0+ installed and available on your `PATH` (the adapter runs the `pi` executable)
 - Configure `pi` separately for your model providers/API keys
 
 ## Install
@@ -189,17 +190,33 @@ Other built-in commands:
 
 `pi-acp` runs pi with its extensions enabled and translates their UI to ACP. It has been verified with:
 
-| Extension                                                      | What you get in the ACP client                                                                                                                             |
-| -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [pi-mcp-adapter](https://github.com/nicobailon/pi-mcp-adapter) | `mcp`/`mcpScript` tool calls with titles like `MCP: <tool>`; `/mcp`, `/mcp-auth` commands; OAuth/elicitation prompts as permission requests                |
-| `@juicesharp/rpiv-advisor`                                     | `advisor` calls shown as **think** tool calls (`Consult advisor`) with streamed status; `/advisor` command                                                 |
-| `@juicesharp/rpiv-args`                                        | `/skill:<name> <args>` argument substitution works transparently                                                                                           |
-| `@juicesharp/rpiv-ask-user-question`                           | Questions render as permission prompts; "Type something." and multi-select answers use ACP elicitation, or a chat reply on clients without it              |
-| `@juicesharp/rpiv-btw`                                         | `/btw` is hidden (requires pi's terminal overlay)                                                                                                          |
-| `@juicesharp/rpiv-todo`                                        | Every `todo` call updates the ACP **plan** view (pending / in progress / completed); `/todos` command                                                      |
-| `@juicesharp/rpiv-web-tools`                                   | `web_search` → **search** (`Search: <query>`), `web_fetch` → **fetch** (`Fetch <url>`); `/web-tools` command                                               |
-| [pi-subagents](https://github.com/nicobailon/pi-subagents)     | `subagent` calls titled by agent/workflow (`Subagent: scout (async)`), background run notices shown in chat, `/subagents-*` commands                       |
-| `@narumitw/pi-goal`                                            | `/goal` command and confirmations; goal status published as `session_info_update` metadata (`_meta.piAcp.status`); `goal_*` tools shown as **think** calls |
+| Extension                                                                        | What you get in the ACP client                                                                                                                             |
+| -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [pi-mcp-adapter](https://github.com/nicobailon/pi-mcp-adapter)                   | `mcp`/`mcpScript` tool calls with titles like `MCP: <tool>`; `/mcp`, `/mcp-auth` commands; OAuth/elicitation prompts as permission requests                |
+| [pi-agent-browser-native](https://github.com/fitchmultz/pi-agent-browser-native) | Browser calls get readable titles and ACP kinds; screenshots render as images and verified screenshots/downloads are linked as local resources             |
+| `@juicesharp/rpiv-advisor`                                                       | `advisor` calls shown as **think** tool calls (`Consult advisor`) with streamed status; `/advisor` command                                                 |
+| `@juicesharp/rpiv-args`                                                          | `/skill:<name> <args>` argument substitution works transparently                                                                                           |
+| `@juicesharp/rpiv-ask-user-question`                                             | Questions render as permission prompts; "Type something." and multi-select answers use ACP elicitation, or a chat reply on clients without it              |
+| `@juicesharp/rpiv-btw`                                                           | `/btw` is hidden (requires pi's terminal overlay)                                                                                                          |
+| `@juicesharp/rpiv-todo`                                                          | Every `todo` call updates the ACP **plan** view (pending / in progress / completed); `/todos` command                                                      |
+| `@juicesharp/rpiv-web-tools`                                                     | `web_search` → **search** (`Search: <query>`), `web_fetch` → **fetch** (`Fetch <url>`); `/web-tools` command                                               |
+| [pi-subagents](https://github.com/nicobailon/pi-subagents)                       | `subagent` calls titled by agent/workflow (`Subagent: scout (async)`), background run notices shown in chat, `/subagents-*` commands                       |
+| `@narumitw/pi-goal`                                                              | `/goal` command and confirmations; goal status published as `session_info_update` metadata (`_meta.piAcp.status`); `goal_*` tools shown as **think** calls |
+
+#### Browser support
+
+Install the browser runtime and Pi extension separately from `pi-acp`. The current known-good baseline is:
+
+```bash
+npm install -g agent-browser@0.38.1
+agent-browser install
+pi install npm:pi-agent-browser-native@0.6.17
+npm exec --yes --package pi-agent-browser-native@0.6.17 -- pi-agent-browser-doctor
+```
+
+Restart the ACP client after installing or updating the extension. Each root Pi session gets its own managed browser identity. Browser snapshots remain text tool output; screenshots are forwarded as ACP images, and browser files that the extension verified on disk are emitted as local resource links. Missing, stale, pending, failed, and otherwise unverified artifact paths are not linked.
+
+Authenticated browser profiles can expose page content to the model and persist login state outside `pi-acp`. Use dedicated test profiles and only enable account-specific browsing for tasks that require it.
 
 How pi extension UI maps to ACP:
 

@@ -10,6 +10,9 @@ test('toToolKind: maps pi built-ins and well-known extension tools', () => {
   assert.equal(toToolKind('advisor'), 'think')
   assert.equal(toToolKind('web_search'), 'search')
   assert.equal(toToolKind('web_fetch'), 'fetch')
+  assert.equal(toToolKind('agent_browser'), 'fetch')
+  assert.equal(toToolKind('agent_browser_code'), 'execute')
+  assert.equal(toToolKind('agent_browser_web_search'), 'search')
   assert.equal(toToolKind('mcpScript'), 'execute')
   assert.equal(toToolKind('todo'), 'think')
   assert.equal(toToolKind('goal_complete'), 'think')
@@ -21,6 +24,22 @@ test('toToolTitle: web tools', () => {
   assert.equal(toToolTitle('web_search', { query: 'pi acp' }), 'Search: pi acp')
   assert.equal(toToolTitle('web_search', {}), 'Web search')
   assert.equal(toToolTitle('web_fetch', { url: 'https://example.com' }), 'Fetch https://example.com')
+})
+
+test('toToolTitle: browser tools', () => {
+  assert.equal(
+    toToolTitle('agent_browser', { args: ['open', 'https://example.com'] }),
+    'Browser: open https://example.com'
+  )
+  assert.equal(toToolTitle('agent_browser', {}), 'Browser')
+  assert.equal(toToolTitle('agent_browser_code', { code: 'secret source' }), 'Browser code')
+  assert.equal(toToolTitle('agent_browser_action', { action: 'click', locator: 'role' }), 'Browser click: role')
+  assert.equal(toToolTitle('agent_browser_qa', { url: 'https://example.com' }), 'Browser QA: https://example.com')
+  assert.equal(
+    toToolTitle('agent_browser_web_search', { query: 'ACP browser support' }),
+    'Browser search: ACP browser support'
+  )
+  assert.equal(toToolTitle('agent_browser_tools', {}), 'Browser capabilities')
 })
 
 test('toToolTitle: mcp adapter', () => {

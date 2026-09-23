@@ -26,7 +26,7 @@ import {
   bashTerminalOutputMeta,
   isBashTool
 } from './translate/bash.js'
-import { toolResultToText } from './translate/pi-tools.js'
+import { toolResultToContent, toolResultToRawOutput } from './translate/pi-tools.js'
 import { toToolKind, toToolTitle } from './translate/extension-tools.js'
 import { TODO_TOOL_NAME, todoResultToPlan } from './translate/plan.js'
 import { sessionStatsToUsageUpdate } from './translate/usage.js'
@@ -931,16 +931,14 @@ export class PiAcpSession {
           break
         }
 
-        const text = this.fileMutationToolCallIds.has(toolCallId) ? '' : toolResultToText(partial)
+        const content = this.fileMutationToolCallIds.has(toolCallId) ? [] : toolResultToContent(partial)
 
         this.emit({
           sessionUpdate: 'tool_call_update',
           toolCallId,
           status: 'in_progress',
-          content: text
-            ? ([{ type: 'content', content: { type: 'text', text } }] satisfies ToolCallContent[])
-            : undefined,
-          ...(this.fileMutationToolCallIds.has(toolCallId) ? {} : { rawOutput: partial })
+          content: content.length > 0 ? content : undefined,
+          ...(this.fileMutationToolCallIds.has(toolCallId) ? {} : { rawOutput: toolResultToRawOutput(partial) })
         })
         break
       }
@@ -961,8 +959,6 @@ export class PiAcpSession {
           this.cleanupToolCall(toolCallId)
           break
         }
-
-        const text = toolResultToText(result)
 
         const snapshot = this.fileSnapshots.get(toolCallId)
         let content: ToolCallContent[] | undefined
@@ -988,8 +984,9 @@ export class PiAcpSession {
           }
         }
 
-        if (!content && !hasStructuredDiff && text) {
-          content = [{ type: 'content', content: { type: 'text', text } }] satisfies ToolCallContent[]
+        if (!content && !hasStructuredDiff) {
+          const translatedContent = toolResultToContent(result)
+          if (translatedContent.length > 0) content = translatedContent
         }
 
         this.emit({
@@ -997,7 +994,7 @@ export class PiAcpSession {
           toolCallId,
           status: isError ? 'failed' : 'completed',
           content,
-          ...(hasStructuredDiff ? {} : { rawOutput: result })
+          ...(hasStructuredDiff ? {} : { rawOutput: toolResultToRawOutput(result) })
         })
 
         const toolName = String((ev as any).toolName ?? this.toolCallNames.get(toolCallId) ?? '')

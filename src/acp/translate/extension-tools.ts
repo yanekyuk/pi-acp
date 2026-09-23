@@ -24,6 +24,15 @@ const TOOL_KINDS: Record<string, ToolKind> = {
   advisor: 'think',
   web_search: 'search',
   web_fetch: 'fetch',
+  agent_browser: 'fetch',
+  agent_browser_action: 'fetch',
+  agent_browser_code: 'execute',
+  agent_browser_electron: 'execute',
+  agent_browser_network_source: 'search',
+  agent_browser_qa: 'fetch',
+  agent_browser_source: 'search',
+  agent_browser_tools: 'other',
+  agent_browser_web_search: 'search',
   mcp: 'other',
   mcpScript: 'execute',
   subagent: 'other',
@@ -123,6 +132,20 @@ function askUserQuestionTitle(args: Record<string, unknown> | null): string {
   return `Ask user (${questions.length} questions)`
 }
 
+function browserCommandTitle(args: Record<string, unknown> | null): string {
+  const tokens = args?.args
+  if (!Array.isArray(tokens)) return 'Browser'
+
+  const command = tokens.filter((token): token is string => typeof token === 'string' && token.trim().length > 0)
+  return command.length > 0 ? shorten(`Browser: ${command.join(' ')}`) : 'Browser'
+}
+
+function browserActionTitle(args: Record<string, unknown> | null): string {
+  const action = str(args, 'action')
+  const locator = str(args, 'locator') ?? str(args, 'selector')
+  return action ? shorten(`Browser ${action}${locator ? `: ${locator}` : ''}`) : 'Browser action'
+}
+
 /**
  * Human-readable ACP tool call title for a pi tool call.
  * Falls back to the raw tool name for unknown tools.
@@ -140,6 +163,37 @@ export function toToolTitle(toolName: string, rawArgs: unknown): string {
     case 'web_fetch': {
       const url = str(args, 'url')
       return url ? shorten(`Fetch ${url}`) : 'Web fetch'
+    }
+    case 'agent_browser':
+      return browserCommandTitle(args)
+    case 'agent_browser_action':
+      return browserActionTitle(args)
+    case 'agent_browser_code':
+      return 'Browser code'
+    case 'agent_browser_electron': {
+      const action = str(args, 'action')
+      const appName = str(args, 'appName')
+      return shorten(`Browser Electron${action ? ` ${action}` : ''}${appName ? `: ${appName}` : ''}`)
+    }
+    case 'agent_browser_network_source': {
+      const url = str(args, 'url')
+      const requestId = str(args, 'requestId')
+      return shorten(`Inspect browser request${url || requestId ? `: ${url ?? requestId}` : ''}`)
+    }
+    case 'agent_browser_qa': {
+      const url = str(args, 'url')
+      return url ? shorten(`Browser QA: ${url}`) : 'Browser QA'
+    }
+    case 'agent_browser_source': {
+      const component = str(args, 'componentName')
+      const selector = str(args, 'selector')
+      return shorten(`Find browser source${component || selector ? `: ${component ?? selector}` : ''}`)
+    }
+    case 'agent_browser_tools':
+      return 'Browser capabilities'
+    case 'agent_browser_web_search': {
+      const query = str(args, 'query')
+      return query ? shorten(`Browser search: ${query}`) : 'Browser search'
     }
     case 'mcp':
       return shorten(mcpTitle(args))

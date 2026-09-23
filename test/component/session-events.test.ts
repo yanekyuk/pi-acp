@@ -2,7 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, parse, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { PiAcpSession } from '../../src/acp/session.js'
 import { FakeAgentSideConnection, FakePiRpcProcess, asAgentConn } from '../helpers/fakes.js'
 
@@ -142,6 +143,146 @@ test('PiAcpSession: emits tool_call + tool_call_update + completes', async () =>
     terminal_exit: { terminal_id: 't1', exit_code: 0, signal: null }
   })
   assert.equal((conn.updates[2]!.update as any).rawOutput, undefined)
+})
+
+test('PiAcpSession: forwards browser images and saved artifacts as ACP content', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  const imagePath = resolve(parse(process.cwd()).root, 'tmp', 'page.png')
+  const imageUri = pathToFileURL(imagePath).href
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  proc.emit({
+    type: 'tool_execution_start',
+    toolCallId: 'browser-1',
+    toolName: 'agent_browser',
+    args: { args: ['screenshot', imagePath] }
+  })
+  proc.emit({
+    type: 'tool_execution_update',
+    toolCallId: 'browser-1',
+    partialResult: {
+      content: [{ type: 'image', data: 'cGFydGlhbA==', mimeType: 'image/png' }],
+      details: { imagePath }
+    }
+  })
+  proc.emit({
+    type: 'tool_execution_end',
+    toolCallId: 'browser-1',
+    toolName: 'agent_browser',
+    isError: false,
+    result: {
+      content: [
+        { type: 'text', text: `Saved image: ${imagePath}` },
+        { type: 'image', data: 'cG5n', mimeType: 'image/png' }
+      ],
+      details: {
+        imagePath,
+        artifacts: [
+          {
+            absolutePath: imagePath,
+            path: imagePath,
+            exists: true,
+            status: 'saved',
+            kind: 'image',
+            mediaType: 'image/png',
+            sizeBytes: 3
+          }
+        ]
+      }
+    }
+  })
+
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.equal(conn.updates.length, 3)
+  assert.deepEqual(conn.updates[0]!.update, {
+    sessionUpdate: 'tool_call',
+    toolCallId: 'browser-1',
+    name: 'agent_browser',
+    title: `Browser: screenshot ${imagePath}`,
+    kind: 'fetch',
+    status: 'in_progress',
+    locations: undefined,
+    rawInput: { args: ['screenshot', imagePath] }
+  })
+  assert.deepEqual(conn.updates[1]!.update as any, {
+    sessionUpdate: 'tool_call_update',
+    toolCallId: 'browser-1',
+    status: 'in_progress',
+    content: [
+      {
+        type: 'content',
+        content: { type: 'image', data: 'cGFydGlhbA==', mimeType: 'image/png', uri: imageUri }
+      }
+    ],
+    rawOutput: {
+      content: [
+        {
+          type: 'image',
+          data: '[base64 image omitted; forwarded as ACP image content]',
+          mimeType: 'image/png'
+        }
+      ],
+      details: { imagePath }
+    }
+  })
+  assert.deepEqual((conn.updates[2]!.update as any).content, [
+    { type: 'content', content: { type: 'text', text: `Saved image: ${imagePath}` } },
+    {
+      type: 'content',
+      content: {
+        type: 'image',
+        data: 'cG5n',
+        mimeType: 'image/png',
+        uri: imageUri
+      }
+    },
+    {
+      type: 'content',
+      content: {
+        type: 'resource_link',
+        uri: imageUri,
+        name: 'page.png',
+        title: imagePath,
+        description: 'Saved image artifact',
+        mimeType: 'image/png',
+        size: 3
+      }
+    }
+  ])
+  assert.deepEqual((conn.updates[2]!.update as any).rawOutput, {
+    content: [
+      { type: 'text', text: `Saved image: ${imagePath}` },
+      {
+        type: 'image',
+        data: '[base64 image omitted; forwarded as ACP image content]',
+        mimeType: 'image/png'
+      }
+    ],
+    details: {
+      imagePath,
+      artifacts: [
+        {
+          absolutePath: imagePath,
+          path: imagePath,
+          exists: true,
+          status: 'saved',
+          kind: 'image',
+          mediaType: 'image/png',
+          sizeBytes: 3
+        }
+      ]
+    }
+  })
 })
 
 test('PiAcpSession: emits tool locations from pi path args', async () => {

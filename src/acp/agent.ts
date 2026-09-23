@@ -37,7 +37,7 @@ import { PiRpcProcess } from '../pi-rpc/process.js'
 import type { FsBridgeCapabilities } from '../pi-rpc/fs-bridge.js'
 import { listPiSessions, findPiSession, readPiSessionTitle } from './pi-sessions.js'
 import { normalizePiAssistantText, normalizePiMessageText } from './translate/pi-messages.js'
-import { toolResultToText } from './translate/pi-tools.js'
+import { toolResultToContent, toolResultToRawOutput } from './translate/pi-tools.js'
 import { toToolKind, toToolTitle } from './translate/extension-tools.js'
 import {
   bashCommand,
@@ -79,6 +79,27 @@ type SessionRestoreCancellation = {
 type SessionRestore = {
   promise: Promise<PiAcpSession>
   cancellation: SessionRestoreCancellation
+}
+
+function asToolArguments(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined
+}
+
+function historicalToolCallArguments(message: unknown): Map<string, Record<string, unknown>> {
+  const argumentsByToolCallId = new Map<string, Record<string, unknown>>()
+  const record = message as { role?: unknown; content?: unknown }
+  if (record.role !== 'assistant' || !Array.isArray(record.content)) return argumentsByToolCallId
+
+  for (const value of record.content) {
+    const block = value as { type?: unknown; id?: unknown; arguments?: unknown }
+    const args = asToolArguments(block.arguments)
+    if (block.type !== 'toolCall' || typeof block.id !== 'string' || !block.id.trim() || !args) continue
+    argumentsByToolCallId.set(block.id, args)
+  }
+
+  return argumentsByToolCallId
 }
 
 const MODEL_CONFIG_ID = 'model'
@@ -975,10 +996,15 @@ export class PiAcpAgent implements ACPAgent {
     // Replay full conversation history.
     const data = (await proc.getMessages()) as any
     const messages = Array.isArray(data?.messages) ? data.messages : []
+    const toolCallArguments = new Map<string, Record<string, unknown>>()
 
     for (const [messageIndex, m] of messages.entries()) {
       const role = String(m?.role ?? '')
       const messageId = replayMessageId(params.sessionId, messageIndex, m)
+
+      for (const [toolCallId, args] of historicalToolCallArguments(m)) {
+        toolCallArguments.set(toolCallId, args)
+      }
 
       if (role === 'user') {
         const text = normalizePiMessageText(m?.content)
@@ -1013,6 +1039,7 @@ export class PiAcpAgent implements ACPAgent {
         const toolCallId = String((m as any)?.toolCallId ?? crypto.randomUUID())
         const isError = Boolean((m as any)?.isError)
         const isBash = isBashTool(toolName)
+        const restoredArgs = toolCallArguments.get(toolCallId) ?? asToolArguments((m as any)?.args)
 
         if (isBash) {
           const text = bashResultText(m)
@@ -1022,7 +1049,7 @@ export class PiAcpAgent implements ACPAgent {
               sessionUpdate: 'tool_call',
               toolCallId,
               name: toolName,
-              title: bashCommand(m) ?? toolName,
+              title: bashCommand(restoredArgs) ?? bashCommand(m) ?? toolName,
               kind: 'execute',
               status: 'completed',
               content: bashTerminalContent(toolCallId),
@@ -1045,6 +1072,8 @@ export class PiAcpAgent implements ACPAgent {
           continue
         }
 
+        const rawOutput = toolResultToRawOutput(m)
+
         // Create a synthetic ACP tool call to render historic tool usage.
         await this.conn.sessionUpdate({
           sessionId: session.sessionId,
@@ -1052,23 +1081,23 @@ export class PiAcpAgent implements ACPAgent {
             sessionUpdate: 'tool_call',
             toolCallId,
             name: toolName,
-            title: toToolTitle(toolName, null),
+            title: toToolTitle(toolName, restoredArgs),
             kind: toToolKind(toolName),
             status: 'completed',
-            rawInput: null,
-            rawOutput: m
+            rawInput: restoredArgs ?? null,
+            rawOutput
           }
         })
 
-        const text = toolResultToText(m)
+        const content = toolResultToContent(m)
         await this.conn.sessionUpdate({
           sessionId: session.sessionId,
           update: {
             sessionUpdate: 'tool_call_update',
             toolCallId,
             status: isError ? 'failed' : 'completed',
-            content: text ? [{ type: 'content', content: { type: 'text', text } }] : null,
-            rawOutput: m
+            content: content.length > 0 ? content : null,
+            rawOutput
           }
         })
       }
