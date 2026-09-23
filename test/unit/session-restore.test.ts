@@ -53,7 +53,9 @@ test('PiAcpAgent: prompt auto-restores a missing session from SessionStore', asy
   }
 
   try {
-    const agent = new PiAcpAgent(asAgentConn(conn), {} as any)
+    const agent = new PiAcpAgent(asAgentConn(conn), {
+      titleGenerator: async () => 'Restored Session'
+    })
     ;(agent as any).sessions = sessions as any
     ;(agent as any).store = {
       get(sessionId: string) {
@@ -108,13 +110,22 @@ test('PiAcpAgent: setSessionConfigOption auto-restores via pi session discovery 
   mkdirSync(sessionsDir, { recursive: true })
   writeFileSync(
     sessionFile,
-    JSON.stringify({
-      type: 'session',
-      version: 3,
-      id: 'fallback-session',
-      timestamp: '2026-06-16T00:00:00.000Z',
-      cwd: '/tmp/fallback-project'
-    }) + '\n',
+    [
+      JSON.stringify({
+        type: 'session',
+        version: 3,
+        id: 'fallback-session',
+        timestamp: '2026-06-16T00:00:00.000Z',
+        cwd: '/tmp/fallback-project'
+      }),
+      JSON.stringify({
+        type: 'session_info',
+        id: 'fallback-session-info',
+        parentId: null,
+        timestamp: '2026-06-16T00:00:01.000Z',
+        name: 'Restored Fallback Session'
+      })
+    ].join('\n') + '\n',
     'utf-8'
   )
 
@@ -123,6 +134,7 @@ test('PiAcpAgent: setSessionConfigOption auto-restores via pi session discovery 
   const storeUpserts: any[] = []
   const setModelCalls: Array<{ provider: string; modelId: string }> = []
   const spawnCalls: any[] = []
+  let restoredTitle: string | null = null
   const state = {
     thinkingLevel: 'medium',
     model: { provider: 'test', id: 'alpha' }
@@ -131,7 +143,10 @@ test('PiAcpAgent: setSessionConfigOption auto-restores via pi session discovery 
   const sessions = new FakeSessions((sessionId, params) => ({
     sessionId,
     cwd: params.cwd,
-    proc: params.proc
+    proc: params.proc,
+    setTitle(title: string) {
+      restoredTitle = title
+    }
   }))
 
   const originalSpawn = PiRpcProcess.spawn
@@ -181,6 +196,7 @@ test('PiAcpAgent: setSessionConfigOption auto-restores via pi session discovery 
       }
     ])
     assert.deepEqual(setModelCalls, [{ provider: 'test', modelId: 'beta' }])
+    assert.equal(restoredTitle, 'Restored Fallback Session')
     assert.equal(result.configOptions.find(option => option.id === 'model')?.currentValue, 'test/beta')
     assert.deepEqual(storeUpserts, [
       {

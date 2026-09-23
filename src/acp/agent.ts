@@ -28,7 +28,7 @@ import { SessionManager, type ClientUiCapabilities, type PiAcpSession } from './
 import { SessionStore } from './session-store.js'
 import { PiRpcProcess } from '../pi-rpc/process.js'
 import type { FsBridgeCapabilities } from '../pi-rpc/fs-bridge.js'
-import { listPiSessions, findPiSession } from './pi-sessions.js'
+import { listPiSessions, findPiSession, readPiSessionTitle } from './pi-sessions.js'
 import { normalizePiAssistantText, normalizePiMessageText } from './translate/pi-messages.js'
 import { toolResultToText } from './translate/pi-tools.js'
 import { toToolKind, toToolTitle } from './translate/extension-tools.js'
@@ -180,10 +180,14 @@ export class PiAcpAgent implements ACPAgent {
     this.store.delete(sessionId)
   }
 
-  private findStoredSession(sessionId: string): { cwd: string; sessionFile: string } | null {
+  private findStoredSession(sessionId: string): { cwd: string; sessionFile: string; title: string | null } | null {
     const stored = this.store.get(sessionId)
     if (stored?.cwd && stored?.sessionFile) {
-      return { cwd: stored.cwd, sessionFile: stored.sessionFile }
+      return {
+        cwd: stored.cwd,
+        sessionFile: stored.sessionFile,
+        title: readPiSessionTitle(stored.sessionFile)
+      }
     }
 
     const piSession = findPiSession(sessionId)
@@ -197,7 +201,8 @@ export class PiAcpAgent implements ACPAgent {
 
     return {
       cwd: piSession.cwd,
-      sessionFile: piSession.sessionFile
+      sessionFile: piSession.sessionFile,
+      title: piSession.title
     }
   }
 
@@ -243,6 +248,8 @@ export class PiAcpAgent implements ACPAgent {
         fileCommands,
         clientUi: this.clientUi
       })
+
+      if (stored.title) session.setTitle(stored.title)
 
       this.lastSessionCwd = cwd
       this.store.upsert({ sessionId, cwd, sessionFile: stored.sessionFile })
@@ -1028,9 +1035,8 @@ export class PiAcpAgent implements ACPAgent {
       sessionFile: stored.sessionFile
     })
 
-    const existingTitle = findPiSession(params.sessionId)?.title ?? null
+    const existingTitle = session.getTitle()
     if (existingTitle) {
-      session.setTitle?.(existingTitle)
       await this.conn.sessionUpdate({
         sessionId: session.sessionId,
         update: {

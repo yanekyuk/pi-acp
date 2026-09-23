@@ -6,7 +6,14 @@ import { FakeAgentSideConnection, FakePiRpcProcess, asAgentConn } from '../helpe
 
 const generateTestTitle = async () => 'Responsive Navigation'
 
-test('PiAcpAgent: auto-titles new session in background on first prompt', async () => {
+test('PiAcpAgent: auto-titles new session in background on first prompt', async t => {
+  const previousAutoTitle = process.env.PI_ACP_AUTO_TITLE
+  process.env.PI_ACP_AUTO_TITLE = 'true'
+  t.after(() => {
+    if (previousAutoTitle === undefined) delete process.env.PI_ACP_AUTO_TITLE
+    else process.env.PI_ACP_AUTO_TITLE = previousAutoTitle
+  })
+
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess() as any
 
@@ -105,13 +112,18 @@ test('PiAcpAgent: does not auto-title if session already has a title', async () 
   proc.emit({ type: 'agent_settled' })
 
   await promptPromise
-  await new Promise(r => setTimeout(r, 100))
 
   assert.equal(setSessionNameCalls, 0)
   assert.equal(session.getTitle(), 'Already Named Session')
 })
 
-test('PiAcpAgent: does not auto-title when autoTitle is disabled via env', async () => {
+test('PiAcpAgent: does not auto-title when autoTitle is disabled via env', async t => {
+  const previousAutoTitle = process.env.PI_ACP_AUTO_TITLE
+  t.after(() => {
+    if (previousAutoTitle === undefined) delete process.env.PI_ACP_AUTO_TITLE
+    else process.env.PI_ACP_AUTO_TITLE = previousAutoTitle
+  })
+
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess() as any
 
@@ -135,25 +147,20 @@ test('PiAcpAgent: does not auto-title when autoTitle is disabled via env', async
     getOrCreate: () => session
   }
 
-  process.env.PI_AUTO_TITLE = 'false'
-  try {
-    const promptPromise = agent.prompt({
-      sessionId: 's1',
-      prompt: [{ type: 'text', text: 'Do some work' }]
-    } as any)
+  process.env.PI_ACP_AUTO_TITLE = 'false'
+  const promptPromise = agent.prompt({
+    sessionId: 's1',
+    prompt: [{ type: 'text', text: 'Do some work' }]
+  } as any)
 
-    proc.emit({ type: 'agent_start' })
-    proc.emit({ type: 'agent_end' })
-    proc.emit({ type: 'agent_settled' })
+  proc.emit({ type: 'agent_start' })
+  proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
 
-    await promptPromise
-    await new Promise(r => setTimeout(r, 100))
+  await promptPromise
 
-    assert.equal(setSessionNameCalls, 0)
-    assert.equal(session.getIsTitled(), false)
-  } finally {
-    delete process.env.PI_AUTO_TITLE
-  }
+  assert.equal(setSessionNameCalls, 0)
+  assert.equal(session.getIsTitled(), false)
 })
 
 test('PiAcpSession: extension UI setTitle updates session title and emits session_info_update', async () => {
