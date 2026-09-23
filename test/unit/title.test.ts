@@ -62,9 +62,20 @@ test('buildTitlePrompt: formats conversation context', () => {
   assert.match(prompt, /Assistant: Here is a step-by-step migration guide/)
 })
 
-test('generateTitle: uses spawn output when process succeeds', async () => {
-  const mockSpawn = ((_cmd: string, _args: string[]) => {
+test('generateTitle: sends the title prompt over stdin and uses successful output', async () => {
+  let spawnedArgs: string[] = []
+  let spawnedStdio: unknown
+  let stdinText = ''
+
+  const mockSpawn = ((_cmd: string, args: string[], options: { stdio?: unknown }) => {
+    spawnedArgs = args
+    spawnedStdio = options.stdio
+
     const child = new EventEmitter() as any
+    child.stdin = new EventEmitter()
+    child.stdin.end = (text: string) => {
+      stdinText = text
+    }
     child.stdout = new EventEmitter()
     child.kill = () => {}
 
@@ -82,6 +93,9 @@ test('generateTitle: uses spawn output when process succeeds', async () => {
   })
 
   assert.equal(title, 'Generated Title From AI')
+  assert.deepEqual(spawnedStdio, ['pipe', 'pipe', 'pipe'])
+  assert.match(stdinText, /User: Test prompt/)
+  assert.ok(!spawnedArgs.includes(stdinText))
 })
 
 test('generateTitle: falls back to deriveFallbackTitle on non-zero exit code', async () => {

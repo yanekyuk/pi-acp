@@ -157,8 +157,6 @@ export async function generateTitle(options: TitleOptions): Promise<string> {
     args.push('--model', options.model)
   }
 
-  args.push(promptText)
-
   const shell = shouldUseShellForPiCommand(piCmd)
 
   return await new Promise<string>(resolve => {
@@ -167,7 +165,7 @@ export async function generateTitle(options: TitleOptions): Promise<string> {
       child = spawnFn(piCmd, args, {
         cwd: options.cwd,
         shell,
-        stdio: ['ignore', 'pipe', 'pipe']
+        stdio: ['pipe', 'pipe', 'pipe']
       })
     } catch {
       resolve(deriveFallbackTitle(userMessage))
@@ -193,6 +191,8 @@ export async function generateTitle(options: TitleOptions): Promise<string> {
       resolve(result)
     }
 
+    child.stdin?.on('error', () => {})
+    child.stdin?.end(promptText)
     child.stderr?.resume()
     child.stdout?.on('data', chunk => {
       stdout += String(chunk)
