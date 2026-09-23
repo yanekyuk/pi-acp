@@ -29,7 +29,8 @@ test('PiAcpAgent: /title regenerate regenerates session title', async () => {
   proc.getMessages = async () => ({
     messages: [
       { role: 'user', content: 'Configure Docker compose for Postgres' },
-      { role: 'assistant', content: 'Here is the docker-compose.yml file' }
+      { role: 'assistant', content: 'Here is the docker-compose.yml file' },
+      { role: 'user', content: 'Use a health check before starting the app' }
     ]
   })
 
@@ -48,7 +49,13 @@ test('PiAcpAgent: /title regenerate regenerates session title', async () => {
     }
   }
 
-  const agent = new PiAcpAgent(asAgentConn(conn), { titleGenerator: generateTestTitle })
+  let titleGeneratorOptions: unknown
+  const agent = new PiAcpAgent(asAgentConn(conn), {
+    titleGenerator: async options => {
+      titleGeneratorOptions = options
+      return 'Generated Test Title'
+    }
+  })
   ;(agent as any).sessions = new FakeSessions(fakeSession) as any
 
   const res = await agent.prompt({
@@ -58,6 +65,11 @@ test('PiAcpAgent: /title regenerate regenerates session title', async () => {
 
   assert.equal(res.stopReason, 'end_turn')
   assert.equal(proc.prompts.length, 0)
+  assert.deepEqual((titleGeneratorOptions as any)?.conversation, [
+    { role: 'user', text: 'Configure Docker compose for Postgres' },
+    { role: 'assistant', text: 'Here is the docker-compose.yml file' },
+    { role: 'user', text: 'Use a health check before starting the app' }
+  ])
   assert.ok(setNameCalledWith)
   assert.equal(titled, true)
 

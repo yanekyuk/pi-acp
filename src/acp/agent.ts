@@ -54,7 +54,7 @@ import { loadSlashCommands, parseCommandArgs, toAvailableCommands } from './slas
 import { getAgentDir, getAutoTitle, getEnableSkillCommands, getQuietStartup } from './pi-settings.js'
 import { toAvailableCommandsFromPiGetCommands } from './pi-commands.js'
 import { maybeAuthRequiredError } from './auth-required.js'
-import { generateTitle } from './title.js'
+import { deriveInitialTitle, generateTitle, type TitleConversationMessage } from './title.js'
 import { isAbsolute } from 'node:path'
 import { existsSync, readFileSync, realpathSync, readdirSync, statSync, unlinkSync } from 'node:fs'
 import type { AvailableCommand } from '@agentclientprotocol/sdk'
@@ -591,7 +591,7 @@ export class PiAcpAgent implements ACPAgent {
           cmd === 'regenerate-title' ||
           (cmd === 'title' && (args.length === 0 || args[0]?.toLowerCase() === 'regenerate'))
         ) {
-          await this.generateAndApplySessionTitle(session, { notifyInChat: true })
+          await this.regenerateSessionTitle(session, { notifyInChat: true })
           return { stopReason: 'end_turn' }
         }
 
@@ -882,7 +882,7 @@ export class PiAcpAgent implements ACPAgent {
       message.trim() &&
       !message.trimStart().startsWith('/')
     ) {
-      void this.generateAndApplySessionTitle(session, { userMessage: message }).catch(() => {})
+      void this.setInitialSessionTitle(session, message).catch(() => {})
     }
 
     // ACP StopReason does not include "error"; if pi fails we map to end_turn for now,
@@ -1241,7 +1241,7 @@ export class PiAcpAgent implements ACPAgent {
         throw RequestError.invalidParams('sessionId is required')
       }
       const session = await this.restoreSession(sessionId)
-      const title = await this.generateAndApplySessionTitle(session)
+      const title = await this.regenerateSessionTitle(session)
       return { success: true, title }
     }
     throw RequestError.methodNotFound(method)
@@ -1251,37 +1251,23 @@ export class PiAcpAgent implements ACPAgent {
     return
   }
 
-  private async generateAndApplySessionTitle(
-    session: PiAcpSession,
-    opts?: { userMessage?: string; assistantMessage?: string; notifyInChat?: boolean }
-  ): Promise<string> {
+  private async setInitialSessionTitle(session: PiAcpSession, userMessage: string): Promise<string> {
     session.setIsTitling?.(true)
     try {
-      let userMessage = opts?.userMessage ?? session.getLastUserMessage?.() ?? ''
-      let assistantMessage = opts?.assistantMessage
+      const title = deriveInitialTitle(userMessage)
+      await this.applySessionTitle(session, title)
+      return title
+    } finally {
+      session.setIsTitling?.(false)
+    }
+  }
 
-      if (!userMessage || assistantMessage === undefined) {
-        try {
-          const data = (await session.proc.getMessages()) as any
-          const messages: any[] = Array.isArray(data?.messages) ? data.messages : []
-
-          if (!userMessage) {
-            const firstUser = messages.find(m => m?.role === 'user')
-            if (firstUser) {
-              userMessage = normalizePiMessageText(firstUser.content)
-            }
-          }
-
-          if (assistantMessage === undefined) {
-            const lastAssistant = [...messages].reverse().find(m => m?.role === 'assistant')
-            if (lastAssistant) {
-              assistantMessage = normalizePiAssistantText(lastAssistant.content)
-            }
-          }
-        } catch {
-          // Title generation can proceed with whichever conversation context is available.
-        }
-      }
+  private async regenerateSessionTitle(session: PiAcpSession, opts?: { notifyInChat?: boolean }): Promise<string> {
+    session.setIsTitling?.(true)
+    try {
+      const conversation = await this.getTitleConversation(session)
+      const userMessage =
+        conversation.find(message => message.role === 'user')?.text ?? session.getLastUserMessage?.() ?? ''
 
       let model: string | undefined
       try {
@@ -1294,44 +1280,66 @@ export class PiAcpAgent implements ACPAgent {
           else if (id) model = id
         }
       } catch {
-        // ignore
+        // Title generation can use the default model when session state is unavailable.
       }
 
       const title = await this.titleGenerator({
         userMessage,
-        assistantMessage,
+        conversation,
         cwd: session.cwd,
         model,
         piCommand: process.env.PI_ACP_PI_COMMAND
       })
 
-      session.setTitle?.(title)
-
-      try {
-        await session.proc.setSessionName(title)
-      } catch {
-        // ignore if pi version doesn't support setSessionName
-      }
-
-      await this.conn.sessionUpdate({
-        sessionId: session.sessionId,
-        update: {
-          sessionUpdate: 'session_info_update',
-          title,
-          updatedAt: new Date().toISOString()
-        }
-      })
-
-      if (opts?.notifyInChat) {
-        await this.sendSyntheticAgentMessage(session.sessionId, {
-          type: 'text',
-          text: `Session title set: ${title}`
-        })
-      }
-
+      await this.applySessionTitle(session, title, opts?.notifyInChat)
       return title
     } finally {
       session.setIsTitling?.(false)
+    }
+  }
+
+  private async getTitleConversation(session: PiAcpSession): Promise<TitleConversationMessage[]> {
+    try {
+      const data = (await session.proc.getMessages()) as { messages?: unknown }
+      if (!Array.isArray(data.messages)) return []
+
+      const conversation: TitleConversationMessage[] = []
+      for (const message of data.messages) {
+        const record = message as { role?: unknown; content?: unknown }
+        if (record.role !== 'user' && record.role !== 'assistant') continue
+
+        const text = normalizePiMessageText(record.content).trim()
+        if (text) conversation.push({ role: record.role, text })
+      }
+      return conversation
+    } catch {
+      return []
+    }
+  }
+
+  private async applySessionTitle(session: PiAcpSession, title: string, notifyInChat = false): Promise<void> {
+    session.setTitle?.(title)
+
+    try {
+      await session.proc.setSessionName(title)
+    } catch {
+      // Older pi versions do not support setSessionName in RPC mode.
+    }
+
+    await this.conn.sessionUpdate({
+      sessionId: session.sessionId,
+      update: {
+        sessionUpdate: 'session_info_update',
+        title,
+        updatedAt: new Date().toISOString()
+      }
+    })
+
+    if (notifyInChat) {
+      await this.sendSyntheticAgentMessage(session.sessionId, {
+        type: 'text',
+        text: `Session title set: ${title}`
+      })
     }
   }
 }

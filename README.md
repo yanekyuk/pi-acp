@@ -128,7 +128,7 @@ Point your ACP client to the built `dist/index.js`:
 - Embedded ACP context is enabled by default so clients such as Zed can attach rich context.
 - Set `PI_ACP_ENABLE_EMBEDDED_CONTEXT=false` to opt out.
 - When disabled, compliant ACP clients should avoid sending embedded `resource` blocks. If they send them anyway, `pi-acp` still degrades gracefully by converting them into plain-text prompt context.
-- `PI_ACP_AUTO_TITLE=false` disables automatic title generation after a new session's first prompt. You can also set `autoTitle: false` in pi's global or project `settings.json`. Automatic titles are enabled by default.
+- `PI_ACP_AUTO_TITLE=false` disables automatic naming from a new session's first prompt. You can also set `autoTitle: false` in pi's global or project `settings.json`. Automatic titles are enabled by default; `/title regenerate` uses the active model to create a smarter branch-style title from the conversation.
 
 You can add the environment variable in the Zed settings with:
 

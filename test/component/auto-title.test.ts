@@ -4,9 +4,9 @@ import { PiAcpAgent } from '../../src/acp/agent.js'
 import { PiAcpSession } from '../../src/acp/session.js'
 import { FakeAgentSideConnection, FakePiRpcProcess, asAgentConn } from '../helpers/fakes.js'
 
-const generateTestTitle = async () => 'Responsive Navigation'
+const generateTestTitle = async () => 'Generated Test Title'
 
-test('PiAcpAgent: auto-titles new session in background on first prompt', async t => {
+test('PiAcpAgent: auto-titles new session from the first prompt without invoking the model', async t => {
   const previousAutoTitle = process.env.PI_ACP_AUTO_TITLE
   process.env.PI_ACP_AUTO_TITLE = 'true'
   t.after(() => {
@@ -33,7 +33,13 @@ test('PiAcpAgent: auto-titles new session in background on first prompt', async 
     conn: asAgentConn(conn)
   })
 
-  const agent = new PiAcpAgent(asAgentConn(conn), { titleGenerator: generateTestTitle })
+  let titleGeneratorCalls = 0
+  const agent = new PiAcpAgent(asAgentConn(conn), {
+    titleGenerator: async () => {
+      titleGeneratorCalls++
+      return 'Generated Test Title'
+    }
+  })
   ;(agent as any).sessions = {
     maybeGet: () => session,
     get: () => session,
@@ -68,7 +74,8 @@ test('PiAcpAgent: auto-titles new session in background on first prompt', async 
     poll()
   })
 
-  assert.equal(setSessionNameValue, 'Responsive Navigation')
+  assert.equal(titleGeneratorCalls, 0)
+  assert.equal(setSessionNameValue, 'Create a responsive navigation bar')
 
   const infoUpdate = conn.updates.find(
     u => (u as any).update?.sessionUpdate === 'session_info_update' && (u as any).update?.title
