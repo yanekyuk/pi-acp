@@ -166,10 +166,12 @@ test('PiAcpSession: emits tool locations from pi path args', async () => {
   assert.deepEqual((conn.updates[0]!.update as any).locations, [{ path: `${process.cwd()}/src/acp/session.ts` }])
 })
 
-test('PiAcpSession: handles extension select via ACP permission request', async () => {
+test('PiAcpSession: puts the full extension select question in wrapping permission content', async () => {
   const conn = new FakeAgentSideConnection()
   conn.nextPermissionResponse = { outcome: { outcome: 'selected', optionId: 'choice-1' } }
   const proc = new FakePiRpcProcess()
+  const question =
+    'Which implementation approach should be used for this change, including its compatibility and migration requirements?'
 
   new PiAcpSession({
     sessionId: 's1',
@@ -184,7 +186,7 @@ test('PiAcpSession: handles extension select via ACP permission request', async 
     type: 'extension_ui_request',
     id: 'ui-1',
     method: 'select',
-    title: 'Pick one',
+    title: question,
     options: ['Alpha', 'Beta']
   })
 
@@ -195,11 +197,12 @@ test('PiAcpSession: handles extension select via ACP permission request', async 
     sessionId: 's1',
     toolCall: {
       toolCallId: 'pi-ui-ui-1',
-      title: 'Pick one',
+      title: 'Choose an option',
       name: 'select',
       kind: 'other',
       status: 'pending',
-      rawInput: { method: 'select', title: 'Pick one', options: ['Alpha', 'Beta'] }
+      content: [{ type: 'content', content: { type: 'text', text: question } }],
+      rawInput: { method: 'select', title: question, options: ['Alpha', 'Beta'] }
     },
     options: [
       { optionId: 'choice-0', name: 'Alpha', kind: 'allow_once' },
@@ -234,6 +237,19 @@ test('PiAcpSession: handles extension confirm via ACP permission request', async
   await new Promise(r => setTimeout(r, 0))
 
   assert.equal(conn.permissionRequests.length, 1)
+  assert.deepEqual((conn.permissionRequests[0] as any).toolCall, {
+    toolCallId: 'pi-ui-ui-2',
+    title: 'Confirm',
+    name: 'confirm',
+    kind: 'other',
+    status: 'pending',
+    content: [{ type: 'content', content: { type: 'text', text: 'Clear session?\n\nAll messages will be lost.' } }],
+    rawInput: {
+      method: 'confirm',
+      title: 'Clear session?',
+      message: 'All messages will be lost.'
+    }
+  })
   assert.deepEqual((conn.permissionRequests[0] as any).options, [
     { optionId: 'yes', name: 'Yes', kind: 'allow_once' },
     { optionId: 'no', name: 'No', kind: 'reject_once' }

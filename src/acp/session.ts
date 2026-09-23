@@ -1288,7 +1288,7 @@ export class PiAcpSession {
 
 function extensionUiToolCall(id: string, ev: PiRpcEvent) {
   const method = stringProp(ev, 'method') ?? 'ui'
-  const title = stringProp(ev, 'title') ?? `Pi ${method}`
+  const prompt = extensionUiPrompt(ev)
   const rawInput: Record<string, unknown> = { method }
 
   for (const key of EXTENSION_UI_RAW_INPUT_KEYS) {
@@ -1297,12 +1297,29 @@ function extensionUiToolCall(id: string, ev: PiRpcEvent) {
 
   return {
     toolCallId: `pi-ui-${id}`,
-    title,
+    title: extensionUiToolTitle(method),
     name: method,
     kind: 'other' as const,
     status: 'pending' as const,
+    content: prompt
+      ? ([{ type: 'content', content: { type: 'text', text: prompt } }] satisfies ToolCallContent[])
+      : undefined,
     rawInput
   }
+}
+
+function extensionUiToolTitle(method: string): string {
+  if (method === 'select') return 'Choose an option'
+  if (method === 'confirm') return 'Confirm'
+  return `Pi ${method}`
+}
+
+function extensionUiPrompt(ev: PiRpcEvent): string {
+  const title = stringProp(ev, 'title')?.trim() ?? ''
+  const message = stringProp(ev, 'message')?.trim() ?? ''
+
+  if (title && message && title !== message) return `${title}\n\n${message}`
+  return title || message
 }
 
 function stringProp(source: Record<string, unknown>, key: string): string | null {
