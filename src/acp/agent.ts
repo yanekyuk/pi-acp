@@ -24,13 +24,14 @@ import {
   type DeleteSessionResponse
 } from '@agentclientprotocol/sdk'
 import { getAuthMethods } from './auth.js'
-import { SessionManager, type PiAcpSession } from './session.js'
+import { SessionManager, type ClientUiCapabilities, type PiAcpSession } from './session.js'
 import { SessionStore } from './session-store.js'
 import { PiRpcProcess } from '../pi-rpc/process.js'
 import type { FsBridgeCapabilities } from '../pi-rpc/fs-bridge.js'
 import { listPiSessions, findPiSession } from './pi-sessions.js'
 import { normalizePiAssistantText, normalizePiMessageText } from './translate/pi-messages.js'
 import { toolResultToText } from './translate/pi-tools.js'
+import { toToolKind, toToolTitle } from './translate/extension-tools.js'
 import {
   bashCommand,
   bashExitCode,
@@ -137,6 +138,9 @@ export class PiAcpAgent implements ACPAgent {
   // Client `fs` capabilities from initialize. Drives FS bridge setup for every pi subprocess.
   private clientFs: FsBridgeCapabilities = { readTextFile: false, writeTextFile: false }
 
+  // Client UI capabilities from initialize. Drives how pi extension dialogs are rendered.
+  private clientUi: ClientUiCapabilities = { elicitationForm: false }
+
   constructor(conn: AgentSideConnection, _config?: unknown) {
     this.conn = conn
     void _config
@@ -221,7 +225,8 @@ export class PiAcpAgent implements ACPAgent {
         mcpServers: opts?.mcpServers ?? [],
         conn: this.conn,
         proc,
-        fileCommands
+        fileCommands,
+        clientUi: this.clientUi
       })
 
       this.lastSessionCwd = cwd
@@ -247,6 +252,11 @@ export class PiAcpAgent implements ACPAgent {
     this.clientFs = {
       readTextFile: params.clientCapabilities?.fs?.readTextFile === true,
       writeTextFile: params.clientCapabilities?.fs?.writeTextFile === true
+    }
+
+    // **UNSTABLE** ACP capability: form elicitation lets pi `input`/`editor` dialogs render natively.
+    this.clientUi = {
+      elicitationForm: Boolean(params.clientCapabilities?.elicitation?.form)
     }
 
     return {
@@ -296,7 +306,8 @@ export class PiAcpAgent implements ACPAgent {
       conn: this.conn,
       fileCommands,
       piCommand: process.env.PI_ACP_PI_COMMAND,
-      clientFs: this.clientFs
+      clientFs: this.clientFs,
+      clientUi: this.clientUi
     })
 
     // Fetch state + models once (parallel) to reduce startup latency.
@@ -407,37 +418,41 @@ export class PiAcpAgent implements ACPAgent {
     // Important: some clients (e.g. Zed) will ignore notifications for an unknown sessionId.
     // So we must send this *after* the session/new response has been delivered.
     setTimeout(() => {
-      void (async () => {
-        try {
-          const pi = (await session.proc.getCommands()) as any
-          const { commands } = toAvailableCommandsFromPiGetCommands(pi, {
-            enableSkillCommands,
-            includeExtensionCommands: false
-          })
-
-          await this.conn.sessionUpdate({
-            sessionId: session.sessionId,
-            update: {
-              sessionUpdate: 'available_commands_update',
-              availableCommands: mergeCommands(commands, builtinAvailableCommands())
-            }
-          })
-          return
-        } catch {
-          // Fall back to file-based prompt templates (legacy behavior).
-        }
-
-        await this.conn.sessionUpdate({
-          sessionId: session.sessionId,
-          update: {
-            sessionUpdate: 'available_commands_update',
-            availableCommands: mergeCommands(toAvailableCommands(fileCommands), builtinAvailableCommands())
-          }
-        })
-      })()
+      void this.advertiseAvailableCommands(session, { enableSkillCommands, fileCommands })
     }, 0)
 
     return response
+  }
+
+  /**
+   * Publish the session's slash commands: pi extension commands, prompt templates, skills,
+   * plus the adapter's built-in commands. Falls back to file-based prompt templates when
+   * pi's `get_commands` is unavailable.
+   */
+  private async advertiseAvailableCommands(
+    session: PiAcpSession,
+    opts: { enableSkillCommands: boolean; fileCommands: ReturnType<typeof loadSlashCommands> }
+  ): Promise<void> {
+    let commands: AvailableCommand[]
+    try {
+      const pi = (await session.proc.getCommands()) as any
+      const translated = toAvailableCommandsFromPiGetCommands(pi, {
+        enableSkillCommands: opts.enableSkillCommands,
+        includeExtensionCommands: true
+      })
+      commands = translated.commands
+      session.setExtensionCommands?.(translated.extensionCommandNames)
+    } catch {
+      commands = toAvailableCommands(opts.fileCommands)
+    }
+
+    await this.conn.sessionUpdate({
+      sessionId: session.sessionId,
+      update: {
+        sessionUpdate: 'available_commands_update',
+        availableCommands: mergeCommands(commands, builtinAvailableCommands())
+      }
+    })
   }
 
   async authenticate(_params: AuthenticateRequest) {
@@ -1049,8 +1064,8 @@ export class PiAcpAgent implements ACPAgent {
           update: {
             sessionUpdate: 'tool_call',
             toolCallId,
-            title: toolName,
-            kind: toolName === 'read' ? 'read' : toolName === 'write' || toolName === 'edit' ? 'edit' : 'other',
+            title: toToolTitle(toolName, null),
+            kind: toToolKind(toolName),
             status: 'completed',
             rawInput: null,
             rawOutput: m
@@ -1086,34 +1101,7 @@ export class PiAcpAgent implements ACPAgent {
 
     // Advertise slash commands after the response so the client knows the session exists.
     setTimeout(() => {
-      void (async () => {
-        try {
-          const pi = (await proc.getCommands()) as any
-          const { commands } = toAvailableCommandsFromPiGetCommands(pi, {
-            enableSkillCommands,
-            includeExtensionCommands: false
-          })
-
-          await this.conn.sessionUpdate({
-            sessionId: session.sessionId,
-            update: {
-              sessionUpdate: 'available_commands_update',
-              availableCommands: mergeCommands(commands, builtinAvailableCommands())
-            }
-          })
-          return
-        } catch {
-          // fall back
-        }
-
-        await this.conn.sessionUpdate({
-          sessionId: session.sessionId,
-          update: {
-            sessionUpdate: 'available_commands_update',
-            availableCommands: mergeCommands(toAvailableCommands(fileCommands), builtinAvailableCommands())
-          }
-        })
-      })()
+      void this.advertiseAvailableCommands(session, { enableSkillCommands, fileCommands })
     }, 0)
 
     return response

@@ -241,7 +241,92 @@ test('PiAcpSession: sends cancelled response when ACP confirm is cancelled', asy
   assert.deepEqual(proc.extensionUiResponses, [{ id: 'ui-5', cancelled: true }])
 })
 
-test('PiAcpSession: cancels unsupported input and editor extension UI requests with visible fallback', async () => {
+test('PiAcpSession: input/editor UI requests fall back to a chat reply when the client lacks elicitation', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  proc.emit({ type: 'extension_ui_request', id: 'ui-3', method: 'input', title: 'Enter name', placeholder: 'e.g. Ada' })
+  await new Promise(r => setTimeout(r, 0))
+
+  // The user is told to answer in chat; pi is still waiting.
+  assert.deepEqual(proc.extensionUiResponses, [])
+  assert.equal(conn.updates.length, 1)
+  assert.equal(conn.updates[0]!.update.sessionUpdate, 'agent_message_chunk')
+  assert.match((conn.updates[0]!.update as any).content.text, /\*\*Enter name\*\*/)
+  assert.match((conn.updates[0]!.update as any).content.text, /e\.g\. Ada/)
+  assert.match((conn.updates[0]!.update as any).content.text, /Reply with your answer in chat/)
+  assert.deepEqual((conn.updates[0]!.update as any)._meta, { piAcp: { inputRequest: { id: 'ui-3', method: 'input' } } })
+
+  // The next chat message answers the request instead of starting a new pi prompt.
+  const stopReason = await session.prompt('Ada Lovelace')
+  assert.equal(stopReason, 'end_turn')
+  assert.deepEqual(proc.extensionUiResponses, [{ id: 'ui-3', value: 'Ada Lovelace' }])
+  assert.deepEqual(proc.prompts, [])
+
+  // A newer editor request supersedes an unanswered input request.
+  proc.emit({ type: 'extension_ui_request', id: 'ui-4', method: 'input', title: 'First' })
+  proc.emit({ type: 'extension_ui_request', id: 'ui-5', method: 'editor', title: 'Edit text', prefill: 'old body' })
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.deepEqual(proc.extensionUiResponses.slice(1), [{ id: 'ui-4', cancelled: true }])
+  assert.match((conn.updates.at(-1)!.update as any).content.text, /old body/)
+
+  // Cancelling the session dismisses the outstanding request.
+  await session.cancel()
+  assert.deepEqual(proc.extensionUiResponses.slice(2), [{ id: 'ui-5', cancelled: true }])
+})
+
+test('PiAcpSession: input/editor UI requests use ACP elicitation when the client supports it', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: [],
+    clientUi: { elicitationForm: true }
+  })
+
+  conn.nextElicitationResponse = { action: 'accept', content: { value: 'Ada' } }
+  proc.emit({ type: 'extension_ui_request', id: 'ui-3', method: 'input', title: 'Enter name', placeholder: 'e.g. Ada' })
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.equal(conn.elicitations.length, 1)
+  assert.deepEqual(conn.elicitations[0], {
+    mode: 'form',
+    sessionId: 's1',
+    message: 'Enter name',
+    requestedSchema: {
+      type: 'object',
+      properties: { value: { type: 'string', title: 'Value', description: 'e.g. Ada' } },
+      required: ['value']
+    },
+    _meta: { piAcp: { method: 'input' } }
+  })
+  assert.deepEqual(proc.extensionUiResponses, [{ id: 'ui-3', value: 'Ada' }])
+  assert.equal(conn.updates.length, 0)
+
+  conn.nextElicitationResponse = { action: 'decline' }
+  proc.emit({ type: 'extension_ui_request', id: 'ui-4', method: 'editor', title: 'Edit', prefill: 'body' })
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.equal((conn.elicitations[1] as any).requestedSchema.properties.value.default, 'body')
+  assert.deepEqual(proc.extensionUiResponses[1], { id: 'ui-4', cancelled: true })
+})
+
+test('PiAcpSession: setStatus UI requests publish status via session_info_update metadata', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
 
@@ -254,18 +339,25 @@ test('PiAcpSession: cancels unsupported input and editor extension UI requests w
     fileCommands: []
   })
 
-  proc.emit({ type: 'extension_ui_request', id: 'ui-3', method: 'input', title: 'Enter name' })
-  proc.emit({ type: 'extension_ui_request', id: 'ui-4', method: 'editor', title: 'Edit text' })
-
+  proc.emit({
+    type: 'extension_ui_request',
+    id: 's-1',
+    method: 'setStatus',
+    statusKey: 'goal',
+    statusText: 'turn 2/10'
+  })
+  proc.emit({ type: 'extension_ui_request', id: 's-2', method: 'setStatus', statusKey: 'goal' })
+  proc.emit({ type: 'extension_ui_request', id: 'w-1', method: 'setWidget', widgetKey: 'x', widgetLines: ['a'] })
   await new Promise(r => setTimeout(r, 0))
 
-  assert.deepEqual(proc.extensionUiResponses, [
-    { id: 'ui-3', cancelled: true },
-    { id: 'ui-4', cancelled: true }
-  ])
-  assert.equal(conn.updates.length, 2)
-  assert.match((conn.updates[0]!.update as any).content.text, /input UI request is not supported/)
-  assert.match((conn.updates[1]!.update as any).content.text, /editor UI request is not supported/)
+  assert.deepEqual(proc.extensionUiResponses, [])
+  assert.deepEqual(
+    conn.updates.map(u => u.update),
+    [
+      { sessionUpdate: 'session_info_update', _meta: { piAcp: { status: { key: 'goal', text: 'turn 2/10' } } } },
+      { sessionUpdate: 'session_info_update', _meta: { piAcp: { status: { key: 'goal', text: null } } } }
+    ]
+  )
 })
 
 test('PiAcpSession: emits agent_message_chunk for auto_retry_start with attempt/maxAttempts and rounded delay', async () => {
@@ -870,7 +962,8 @@ test('PiAcpSession: tags extension notify chunks with severity in _meta', async 
     content: { type: 'text', text: 'MCP: connection failed' },
     _meta: { piAcp: { notify: { level: 'error' } } }
   })
-  assert.deepEqual(proc.extensionUiResponses[0], { id: 'n1', cancelled: true })
+  // notify is fire-and-forget: pi expects no response.
+  assert.deepEqual(proc.extensionUiResponses, [])
 })
 
 test('PiAcpSession: defaults notify severity to info when notifyType is absent', async () => {

@@ -5,8 +5,7 @@ import type {
   PermissionOption,
   SessionUpdate,
   ToolCallContent,
-  ToolCallLocation,
-  ToolKind
+  ToolCallLocation
 } from '@agentclientprotocol/sdk'
 import { RequestError } from '@agentclientprotocol/sdk'
 import { readFileSync } from 'node:fs'
@@ -28,6 +27,21 @@ import {
   isBashTool
 } from './translate/bash.js'
 import { toolResultToText } from './translate/pi-tools.js'
+import { toToolKind, toToolTitle } from './translate/extension-tools.js'
+import { TODO_TOOL_NAME, todoResultToPlan } from './translate/plan.js'
+import {
+  buildTextElicitation,
+  elicitationTextValue,
+  formatChatInputPrompt,
+  parseExtensionCommandName,
+  type TextInputMethod
+} from './translate/extension-ui.js'
+
+/** Client-side ACP capabilities that change how pi extension UI requests are rendered. */
+export type ClientUiCapabilities = {
+  /** Client advertised `clientCapabilities.elicitation.form` (unstable ACP). */
+  elicitationForm: boolean
+}
 
 type SessionCreateParams = {
   cwd: string
@@ -36,6 +50,7 @@ type SessionCreateParams = {
   fileCommands?: import('./slash-commands.js').FileSlashCommand[]
   piCommand?: string
   clientFs?: FsBridgeCapabilities
+  clientUi?: ClientUiCapabilities
 }
 
 export type StopReason = 'end_turn' | 'cancelled' | 'error'
@@ -48,8 +63,19 @@ type PendingTurn = {
 type QueuedTurn = {
   message: string
   images: unknown[]
+  /** The prompt is a pi extension slash command; pi may execute it without starting an agent run. */
+  isExtensionCommand: boolean
   resolve: (reason: StopReason) => void
   reject: (err: unknown) => void
+}
+
+/**
+ * A pi `input`/`editor` UI request that is waiting for the user's next chat message
+ * (fallback for clients without ACP elicitation support).
+ */
+type PendingChatInput = {
+  id: string
+  method: TextInputMethod
 }
 
 type PermissionResponse = Awaited<ReturnType<AgentSideConnection['requestPermission']>>
@@ -60,6 +86,14 @@ const CONFIRM_PERMISSION_OPTIONS: PermissionOption[] = [
 ]
 const EXTENSION_UI_RAW_INPUT_KEYS = ['title', 'message', 'options', 'placeholder', 'prefill'] as const
 const CHOICE_OPTION_PREFIX = 'choice-'
+
+// Pi answers a `prompt` RPC for an extension command only after the command handler returns.
+// If the handler kicked off an agent run (e.g. via pi.sendUserMessage), `agent_start` arrives
+// shortly after; give it a brief window before closing the ACP turn.
+const EXTENSION_COMMAND_SETTLE_GRACE_MS = 50
+
+// Fire-and-forget pi UI methods: no `extension_ui_response` is expected.
+const FIRE_AND_FORGET_UI_METHODS = new Set(['notify', 'setStatus', 'setWidget', 'setTitle', 'set_editor_text'])
 
 function findUniqueLineNumber(text: string, needle: string): number | undefined {
   if (!needle) return undefined
@@ -223,7 +257,8 @@ export class SessionManager {
       mcpServers: params.mcpServers,
       proc,
       conn: params.conn,
-      fileCommands: params.fileCommands ?? []
+      fileCommands: params.fileCommands ?? [],
+      clientUi: params.clientUi
     })
 
     this.sessions.set(sessionId, session)
@@ -250,7 +285,8 @@ export class SessionManager {
       mcpServers: params.mcpServers,
       proc: params.proc,
       conn: params.conn,
-      fileCommands: params.fileCommands ?? []
+      fileCommands: params.fileCommands ?? [],
+      clientUi: params.clientUi
     })
 
     this.sessions.set(sessionId, session)
@@ -269,6 +305,11 @@ export class PiAcpSession {
   readonly proc: PiRpcProcess
   private readonly conn: AgentSideConnection
   private readonly fileCommands: FileSlashCommand[]
+  private readonly clientUi: ClientUiCapabilities
+
+  // Slash commands registered by pi extensions (from pi's `get_commands`). Pi executes these
+  // inside the `prompt` RPC, usually without starting an agent run.
+  private extensionCommands = new Set<string>()
 
   // Used to map abort semantics to ACP stopReason.
   // Applies to the currently running turn.
@@ -277,10 +318,17 @@ export class PiAcpSession {
   // Current in-flight turn (if any). Additional prompts are queued.
   private pendingTurn: PendingTurn | null = null
   private readonly turnQueue: QueuedTurn[] = []
+  // Whether pi emitted `agent_start` since the current turn began.
+  private agentRunObserved = false
+
+  // A pi text input request waiting for the user's next chat message.
+  private pendingChatInput: PendingChatInput | null = null
   // Track tool call statuses and ensure they are monotonic (pending -> in_progress -> completed).
   // Some pi events can arrive out of order (e.g. late toolcall_* deltas after execution starts),
   // and clients may hide progress if we ever downgrade back to `pending`.
   private currentToolCalls = new Map<string, 'pending' | 'in_progress'>()
+  // Tool name per in-flight tool call, for events that omit it.
+  private toolCallNames = new Map<string, string>()
 
   // pi can emit multiple `turn_end` and `agent_end` events for a single user prompt
   // when retry, compaction, or queued continuations run. The session-level prompt
@@ -306,6 +354,7 @@ export class PiAcpSession {
     proc: PiRpcProcess
     conn: AgentSideConnection
     fileCommands?: FileSlashCommand[]
+    clientUi?: ClientUiCapabilities
   }) {
     this.sessionId = opts.sessionId
     this.cwd = opts.cwd
@@ -313,9 +362,15 @@ export class PiAcpSession {
     this.proc = opts.proc
     this.conn = opts.conn
     this.fileCommands = opts.fileCommands ?? []
+    this.clientUi = opts.clientUi ?? { elicitationForm: false }
 
     this.proc.onEvent(ev => this.handlePiEvent(ev))
     this.bindFsBridge()
+  }
+
+  /** Register the slash commands pi extensions expose, so prompts like `/mcp status` end the turn correctly. */
+  setExtensionCommands(names: Iterable<string>): void {
+    this.extensionCommands = new Set(names)
   }
 
   /**
@@ -357,11 +412,19 @@ export class PiAcpSession {
   }
 
   async prompt(message: string, images: unknown[] = []): Promise<StopReason> {
+    // A pi extension asked for text input and we told the user to reply in chat:
+    // this message is the answer, not a new prompt.
+    if (this.pendingChatInput && images.length === 0) {
+      await this.answerPendingChatInput(message)
+      return 'end_turn'
+    }
+
     // pi RPC mode disables slash command expansion, so we do it here.
     const expandedMessage = expandSlashCommand(message, this.fileCommands)
+    const isExtensionCommand = this.isExtensionCommand(message)
 
     const turnPromise = new Promise<StopReason>((resolve, reject) => {
-      const queued: QueuedTurn = { message: expandedMessage, images, resolve, reject }
+      const queued: QueuedTurn = { message: expandedMessage, images, isExtensionCommand, resolve, reject }
 
       // If a turn is already running, enqueue.
       if (this.pendingTurn) {
@@ -397,6 +460,8 @@ export class PiAcpSession {
   async cancel(): Promise<void> {
     // Cancel current and clear any queued prompts.
     this.cancelRequested = true
+
+    await this.cancelPendingChatInput()
 
     if (this.turnQueue.length) {
       const queued = this.turnQueue.splice(0, this.turnQueue.length)
@@ -485,19 +550,37 @@ export class PiAcpSession {
     })
   }
 
+  /** Mirror the rpiv-todo task list into the ACP plan view. */
+  private emitPlanIfTodoResult(toolName: string, result: unknown): void {
+    if (toolName !== TODO_TOOL_NAME) return
+
+    const plan = todoResultToPlan(result)
+    if (!plan) return
+
+    this.emit({ sessionUpdate: 'plan', ...plan })
+  }
+
   private cleanupToolCall(toolCallId: string): void {
     this.currentToolCalls.delete(toolCallId)
+    this.toolCallNames.delete(toolCallId)
     this.fileSnapshots.delete(toolCallId)
     this.fileMutationToolCallIds.delete(toolCallId)
     this.bashToolCallIds.delete(toolCallId)
     this.bashOutputSnapshots.delete(toolCallId)
   }
 
+  private isExtensionCommand(message: string): boolean {
+    const name = parseExtensionCommandName(message)
+    return name !== null && this.extensionCommands.has(name)
+  }
+
   private startTurn(t: QueuedTurn): void {
     this.cancelRequested = false
     this.inAgentLoop = false
+    this.agentRunObserved = false
 
-    this.pendingTurn = { resolve: t.resolve, reject: t.reject }
+    const turn: PendingTurn = { resolve: t.resolve, reject: t.reject }
+    this.pendingTurn = turn
 
     // Publish queue depth (0 because we're starting the turn now).
     this.emit({
@@ -508,35 +591,84 @@ export class PiAcpSession {
     // Kick off pi, but completion is determined by pi events, not the RPC response.
     // The prompt RPC only acknowledges acceptance; retry, compaction, or queued
     // continuations may emit multiple `agent_end` events before `agent_settled`.
-    this.proc.prompt(t.message, t.images).catch(err => {
-      // If the subprocess errors before we get `agent_settled`, treat as error unless cancelled.
-      // Also ensure we flush any already-enqueued updates first.
-      void this.flushEmits().finally(() => {
-        // If this looks like an auth/config issue, surface AUTH_REQUIRED so clients can offer terminal login.
-        const authErr = maybeAuthRequiredError(err)
-        if (authErr) {
-          this.pendingTurn?.reject(authErr)
-        } else {
-          const reason: StopReason = this.cancelRequested ? 'cancelled' : 'error'
-          this.pendingTurn?.resolve(reason)
-        }
+    this.proc.prompt(t.message, t.images).then(
+      () => {
+        if (!t.isExtensionCommand) return
 
-        this.pendingTurn = null
-        this.inAgentLoop = false
+        // Extension commands run inside the `prompt` RPC. Unless the handler started an
+        // agent run, pi never emits `agent_settled`, so the turn ends with the response.
+        setTimeout(() => {
+          if (this.pendingTurn !== turn || this.agentRunObserved) return
+          this.finishTurn(this.cancelRequested ? 'cancelled' : 'end_turn')
+        }, EXTENSION_COMMAND_SETTLE_GRACE_MS)
+      },
+      err => {
+        // If the subprocess errors before we get `agent_settled`, treat as error unless cancelled.
+        // Also ensure we flush any already-enqueued updates first.
+        void this.flushEmits().finally(() => {
+          // If this looks like an auth/config issue, surface AUTH_REQUIRED so clients can offer terminal login.
+          const authErr = maybeAuthRequiredError(err)
+          if (authErr) {
+            this.pendingTurn?.reject(authErr)
+          } else {
+            const reason: StopReason = this.cancelRequested ? 'cancelled' : 'error'
+            this.pendingTurn?.resolve(reason)
+          }
 
-        // If the prompt failed, do not automatically proceed—pi may be unhealthy.
-        // But we still clear the queueDepth metadata.
+          this.pendingTurn = null
+          this.inAgentLoop = false
+
+          // If the prompt failed, do not automatically proceed—pi may be unhealthy.
+          // But we still clear the queueDepth metadata.
+          this.emit({
+            sessionUpdate: 'session_info_update',
+            _meta: { piAcp: { queueDepth: this.turnQueue.length, running: false } }
+          })
+        })
+      }
+    )
+  }
+
+  /**
+   * Complete the current ACP turn after all pending updates are delivered,
+   * then start the next queued prompt (if any).
+   */
+  private finishTurn(reason: StopReason): void {
+    void this.flushEmits().finally(() => {
+      this.pendingTurn?.resolve(reason)
+      this.pendingTurn = null
+      this.inAgentLoop = false
+
+      const next = this.turnQueue.shift()
+      if (next) {
+        this.emit({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: `Starting queued message. (${this.turnQueue.length} remaining)` }
+        })
+        this.startTurn(next)
+      } else {
         this.emit({
           sessionUpdate: 'session_info_update',
-          _meta: { piAcp: { queueDepth: this.turnQueue.length, running: false } }
+          _meta: { piAcp: { queueDepth: 0, running: false } }
         })
-      })
-      void err
+      }
     })
   }
 
   private handlePiEvent(ev: PiRpcEvent) {
     const type = String((ev as any).type ?? '')
+
+    // Any model/tool activity proves pi started an agent run for this turn, even if
+    // `agent_start` was missed (matters for extension-command turns). Custom messages
+    // appended by extensions (pi.sendMessage) are emitted outside a run and don't count.
+    if (
+      type === 'agent_start' ||
+      type === 'turn_start' ||
+      type === 'message_update' ||
+      (type === 'message_start' && (ev as any).message?.role !== 'custom')
+    ) {
+      this.agentRunObserved = true
+    }
 
     switch (type) {
       case 'message_update': {
@@ -572,6 +704,7 @@ export class PiAcpSession {
           const toolName = String((toolCall as any)?.name ?? 'tool')
 
           if (toolCallId) {
+            this.toolCallNames.set(toolCallId, toolName)
             const rawInput =
               (toolCall as any)?.arguments && typeof (toolCall as any).arguments === 'object'
                 ? (toolCall as any).arguments
@@ -606,18 +739,19 @@ export class PiAcpSession {
               this.emit({
                 sessionUpdate: 'tool_call',
                 toolCallId,
-                title: toolName,
+                title: toToolTitle(toolName, rawInput),
                 kind: toToolKind(toolName),
                 status,
                 locations,
                 rawInput
               })
             } else {
-              // Best-effort: keep rawInput updated while args are streaming.
+              // Best-effort: keep rawInput (and the derived title) updated while args are streaming.
               // Keep the existing status (pending or in_progress).
               this.emit({
                 sessionUpdate: 'tool_call_update',
                 toolCallId,
+                title: toToolTitle(toolName, rawInput),
                 status,
                 locations,
                 rawInput
@@ -637,6 +771,8 @@ export class PiAcpSession {
         const toolName = String((ev as any).toolName ?? 'tool')
         const args = (ev as any).args
         let line: number | undefined
+
+        this.toolCallNames.set(toolCallId, toolName)
 
         if (isBashTool(toolName)) {
           const locations = toToolCallLocations(args, this.cwd)
@@ -687,7 +823,7 @@ export class PiAcpSession {
           this.emit({
             sessionUpdate: 'tool_call',
             toolCallId,
-            title: toolName,
+            title: toToolTitle(toolName, args),
             kind: toToolKind(toolName),
             status: 'in_progress',
             locations,
@@ -698,6 +834,7 @@ export class PiAcpSession {
           this.emit({
             sessionUpdate: 'tool_call_update',
             toolCallId,
+            title: toToolTitle(toolName, args),
             status: 'in_progress',
             locations,
             rawInput: args
@@ -786,6 +923,8 @@ export class PiAcpSession {
           ...(hasStructuredDiff ? {} : { rawOutput: result })
         })
 
+        const toolName = String((ev as any).toolName ?? this.toolCallNames.get(toolCallId) ?? '')
+        this.emitPlanIfTodoResult(toolName, result)
         this.cleanupToolCall(toolCallId)
         break
       }
@@ -861,26 +1000,33 @@ export class PiAcpSession {
       case 'agent_settled': {
         // Ensure all updates derived from pi events are delivered before we resolve
         // the ACP `session/prompt` request.
-        void this.flushEmits().finally(() => {
-          const reason: StopReason = this.cancelRequested ? 'cancelled' : 'end_turn'
-          this.pendingTurn?.resolve(reason)
-          this.pendingTurn = null
-          this.inAgentLoop = false
+        this.finishTurn(this.cancelRequested ? 'cancelled' : 'end_turn')
+        break
+      }
 
-          // Start next queued prompt, if any.
-          const next = this.turnQueue.shift()
-          if (next) {
-            this.emit({
-              sessionUpdate: 'agent_message_chunk',
-              content: { type: 'text', text: `Starting queued message. (${this.turnQueue.length} remaining)` }
-            })
-            this.startTurn(next)
-          } else {
-            this.emit({
-              sessionUpdate: 'session_info_update',
-              _meta: { piAcp: { queueDepth: 0, running: false } }
-            })
-          }
+      case 'message_end': {
+        // Extensions (e.g. pi-subagents run notices) inject `custom` messages via pi.sendMessage().
+        const message = (ev as any).message
+        if (message?.role !== 'custom' || message?.display === false) break
+
+        const text = customMessageText(message.content)
+        if (!text) break
+
+        this.emit({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text } satisfies ContentBlock,
+          _meta: { piAcp: { customMessage: { customType: String(message.customType ?? '') } } }
+        })
+        break
+      }
+
+      case 'extension_error': {
+        const extensionPath = String((ev as any).extensionPath ?? 'extension')
+        const error = String((ev as any).error ?? 'unknown error')
+        this.emit({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: `Pi extension error (${extensionPath}): ${error}` } satisfies ContentBlock,
+          _meta: { piAcp: { notify: { level: 'error' } } }
         })
         break
       }
@@ -908,14 +1054,7 @@ export class PiAcpSession {
     }
 
     if (method === 'input' || method === 'editor') {
-      this.emit({
-        sessionUpdate: 'agent_message_chunk',
-        content: {
-          type: 'text',
-          text: `Pi ${method} UI request is not supported in ACP yet; cancelling it.`
-        } satisfies ContentBlock
-      })
-      await this.proc.sendExtensionUiResponse({ id, cancelled: true })
+      await this.handleExtensionTextInput(ev, id, method)
       return
     }
 
@@ -925,11 +1064,99 @@ export class PiAcpSession {
         content: { type: 'text', text: stringProp(ev, 'message') ?? 'Pi notification' } satisfies ContentBlock,
         _meta: { piAcp: { notify: { level: stringProp(ev, 'notifyType') ?? 'info' } } }
       })
-      await this.proc.sendExtensionUiResponse({ id, cancelled: true })
+      return
+    }
+
+    if (method === 'setTitle') {
+      const title = stringProp(ev, 'title')
+      if (title) {
+        this.emit({
+          sessionUpdate: 'session_info_update',
+          title,
+          updatedAt: new Date().toISOString()
+        })
+      }
+      return
+    }
+
+    if (method === 'setStatus') {
+      // Footer status entries (e.g. pi-goal "goal: turn 2/10", pi-mcp-adapter server state).
+      // ACP has no status bar; publish via metadata so capable clients can render it.
+      const statusKey = stringProp(ev, 'statusKey') ?? 'status'
+      const statusText = stringProp(ev, 'statusText')
+      this.emit({
+        sessionUpdate: 'session_info_update',
+        _meta: { piAcp: { status: { key: statusKey, text: statusText } } }
+      })
+      return
+    }
+
+    if (method && FIRE_AND_FORGET_UI_METHODS.has(method)) {
+      // setWidget / set_editor_text: terminal-only affordances with no ACP equivalent.
       return
     }
 
     await this.proc.sendExtensionUiResponse({ id, cancelled: true })
+  }
+
+  /**
+   * Pi `input`/`editor` dialogs: prefer ACP elicitation (structured form) when the client
+   * supports it; otherwise ask the user to answer with their next chat message.
+   */
+  private async handleExtensionTextInput(ev: PiRpcEvent, id: string, method: TextInputMethod): Promise<void> {
+    if (this.clientUi.elicitationForm) {
+      await this.elicitTextInput(ev, id, method)
+      return
+    }
+
+    await this.requestChatInput(ev, id, method)
+  }
+
+  private async elicitTextInput(ev: PiRpcEvent, id: string, method: TextInputMethod): Promise<void> {
+    let response: Awaited<ReturnType<AgentSideConnection['unstable_createElicitation']>>
+    try {
+      response = await this.conn.unstable_createElicitation({
+        ...buildTextElicitation(ev, method),
+        sessionId: this.sessionId
+      })
+    } catch {
+      // Client rejected the unstable method; fall back to the chat reply flow.
+      await this.requestChatInput(ev, id, method)
+      return
+    }
+
+    const value = response.action === 'accept' ? elicitationTextValue(response.content) : null
+    await this.proc.sendExtensionUiResponse(value === null ? { id, cancelled: true } : { id, value })
+  }
+
+  private async requestChatInput(ev: PiRpcEvent, id: string, method: TextInputMethod): Promise<void> {
+    // Only one text input can be outstanding; a newer request supersedes the older one.
+    // Swap synchronously so back-to-back requests cannot both claim the slot.
+    const superseded = this.pendingChatInput
+    this.pendingChatInput = { id, method }
+    if (superseded) await this.proc.sendExtensionUiResponse({ id: superseded.id, cancelled: true }).catch(() => {})
+
+    this.emit({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: formatChatInputPrompt(ev, method) } satisfies ContentBlock,
+      _meta: { piAcp: { inputRequest: { id, method } } }
+    })
+  }
+
+  private async answerPendingChatInput(value: string): Promise<void> {
+    const pending = this.pendingChatInput
+    if (!pending) return
+    this.pendingChatInput = null
+
+    // The client already renders the user's message; just hand the value to pi.
+    await this.proc.sendExtensionUiResponse({ id: pending.id, value })
+  }
+
+  private async cancelPendingChatInput(): Promise<void> {
+    const pending = this.pendingChatInput
+    if (!pending) return
+    this.pendingChatInput = null
+    await this.proc.sendExtensionUiResponse({ id: pending.id, cancelled: true }).catch(() => {})
   }
 
   private async handleExtensionSelect(ev: PiRpcEvent, id: string): Promise<void> {
@@ -1041,16 +1268,14 @@ function formatAutoRetryMessage(ev: PiRpcEvent): string {
   return `Retrying (attempt ${attempt}/${maxAttempts}, waiting ${delaySeconds}s)...`
 }
 
-function toToolKind(toolName: string): ToolKind {
-  switch (toolName) {
-    case 'read':
-      return 'read'
-    case 'write':
-    case 'edit':
-      return 'edit'
-    case 'bash':
-      return 'execute'
-    default:
-      return 'other'
-  }
+/** Text of a pi `custom` message (string or text content blocks). */
+function customMessageText(content: unknown): string {
+  if (typeof content === 'string') return content.trim()
+  if (!Array.isArray(content)) return ''
+
+  return content
+    .map(block => (block?.type === 'text' && typeof block.text === 'string' ? block.text : ''))
+    .filter(Boolean)
+    .join('')
+    .trim()
 }

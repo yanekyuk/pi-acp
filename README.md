@@ -28,6 +28,10 @@ Expect some minor breaking changes.
   - Adds a small set of built-in commands for headless/editor usage
   - Supports skill commands (if enabled in pi settings, they appear as `/skill:skill-name` in the ACP client)
 - Skills are loaded by pi directly and are available in ACP sessions
+- Pi extensions (see [Extensions](#extensions))
+  - Extension slash commands (e.g. `/mcp`, `/goal`, `/advisor`, `/subagents`) are advertised to the client and run through pi
+  - Extension dialogs map to ACP: `select`/`confirm` → permission prompts, `input`/`editor` → ACP elicitation (or a chat reply when the client lacks it), `notify`/`setStatus` → tagged messages/metadata
+  - The `todo` tool (rpiv-todo) is mirrored into the ACP **plan** view; other well-known extension tools get proper ACP tool kinds and human-readable titles
 - (Zed) `pi-acp` emits “startup info” block into the session (pi version, context, skills, prompts, extensions - similar to `pi` in the terminal). You can disable it by setting `quietStartup: true` in pi settings (`~/.pi/agent/settings.json` or `<project>/.pi/settings.json`). When `quietStartup` is enabled, `pi-acp` will still emit a 'New version available' message if the installed pi version is outdated.
 - (Zed) Session history is supported in Zed starting with [`v0.225.0`](https://zed.dev/releases/preview/0.225.0). Session loading / history maps to pi's session files. Sessions can be resumed both in `pi` and in the ACP client.
 
@@ -165,7 +169,40 @@ Other built-in commands:
 
 - Skill commands can be enabled in pi settings and will appear in the slash command list in ACP client as `/skill:skill-name`.
 
-**Note**: Slash commands provided by pi extensions are not currently supported.
+#### 4) Extension commands
+
+- Slash commands registered by pi extensions (`pi.registerCommand`) are advertised to the client and executed by pi. Output the extension emits via `ctx.ui.notify()` is shown in the chat.
+- Commands that only work with pi's terminal overlay UI (`ctx.ui.custom()`), such as `/btw`, are not offered because they cannot render in an ACP client.
+
+### Extensions
+
+`pi-acp` runs pi with its extensions enabled and translates their UI to ACP. It has been verified with:
+
+| Extension                                                      | What you get in the ACP client                                                                                                                             |
+| -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [pi-mcp-adapter](https://github.com/nicobailon/pi-mcp-adapter) | `mcp`/`mcpScript` tool calls with titles like `MCP: <tool>`; `/mcp`, `/mcp-auth` commands; OAuth/elicitation prompts as permission requests                |
+| `@juicesharp/rpiv-advisor`                                     | `advisor` calls shown as **think** tool calls (`Consult advisor`) with streamed status; `/advisor` command                                                 |
+| `@juicesharp/rpiv-args`                                        | `/skill:<name> <args>` argument substitution works transparently                                                                                           |
+| `@juicesharp/rpiv-ask-user-question`                           | Questions render as permission prompts; "Type something." and multi-select answers use ACP elicitation, or a chat reply on clients without it              |
+| `@juicesharp/rpiv-btw`                                         | `/btw` is hidden (requires pi's terminal overlay)                                                                                                          |
+| `@juicesharp/rpiv-todo`                                        | Every `todo` call updates the ACP **plan** view (pending / in progress / completed); `/todos` command                                                      |
+| `@juicesharp/rpiv-web-tools`                                   | `web_search` → **search** (`Search: <query>`), `web_fetch` → **fetch** (`Fetch <url>`); `/web-tools` command                                               |
+| [pi-subagents](https://github.com/nicobailon/pi-subagents)     | `subagent` calls titled by agent/workflow (`Subagent: scout (async)`), background run notices shown in chat, `/subagents-*` commands                       |
+| `@narumitw/pi-goal`                                            | `/goal` command and confirmations; goal status published as `session_info_update` metadata (`_meta.piAcp.status`); `goal_*` tools shown as **think** calls |
+
+How pi extension UI maps to ACP:
+
+| pi `ctx.ui` call                                       | ACP                                                                                                                                                                                                                            |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `select(title, options)`                               | `session/request_permission` with one option per choice                                                                                                                                                                        |
+| `confirm(title, message)`                              | `session/request_permission` with Yes/No                                                                                                                                                                                       |
+| `input(title, placeholder)` / `editor(title, prefill)` | `session/create_elicitation` (form, when the client advertises `clientCapabilities.elicitation.form`); otherwise pi-acp asks in chat and uses the user's **next message** as the answer (cancel with the client's stop button) |
+| `notify(message, type)`                                | `agent_message_chunk` tagged with `_meta.piAcp.notify.level`                                                                                                                                                                   |
+| `setStatus(key, text)`                                 | `session_info_update` with `_meta.piAcp.status`                                                                                                                                                                                |
+| `setTitle(title)`                                      | `session_info_update` with the new title                                                                                                                                                                                       |
+| `setWidget`, `set_editor_text`, `custom`               | not representable in ACP; ignored                                                                                                                                                                                              |
+
+Extension messages (`pi.sendMessage` with `display: true`) and extension errors are surfaced as chat messages.
 
 ## Authentication (ACP Registry support)
 
@@ -200,6 +237,7 @@ Project layout:
 - No ACP terminal delegation (`terminal/*`); pi executes commands locally. File reads/writes go through the client only for pi's built-in `read`/`edit`/`write` tools; `bash` and other tools still touch the disk directly.
 - MCP servers are accepted in ACP params and stored in session state, but not wired through to pi in this adapter. If you use [pi MCP adapter](https://github.com/nicobailon/pi-mcp-adapter) it will be available in the ACP client.
 - Assistant streaming is currently sent as `agent_message_chunk` (no separate thought stream).
+- Extension commands that depend on pi's terminal overlay (`ctx.ui.custom()`), e.g. `/btw` or `/mcp setup`, cannot render in ACP clients; pi-acp hides `/btw` and pi reports the limitation for others.
 - Queue is implemented client-side and should work like pi's `one-at-a-time`
 - ~~ACP clients don't yet suport session history, but ACP sessions from `pi-acp` can be `/resume`d in pi directly~~
 

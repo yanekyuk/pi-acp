@@ -9,9 +9,11 @@ export class FakeAgentSideConnection {
   readonly permissionRequests: unknown[] = []
   readonly fileWrites: Array<{ sessionId: string; path: string; content: string }> = []
   readonly fileReads: Array<{ sessionId: string; path: string }> = []
+  readonly elicitations: unknown[] = []
   nextPermissionResponse: { outcome: { outcome: 'selected'; optionId: string } | { outcome: 'cancelled' } } = {
     outcome: { outcome: 'selected', optionId: 'allow' }
   }
+  nextElicitationResponse: ElicitationResponse = { action: 'cancel' }
 
   async sessionUpdate(msg: SessionUpdateMsg): Promise<void> {
     this.updates.push(msg)
@@ -33,7 +35,17 @@ export class FakeAgentSideConnection {
     this.fileReads.push(params)
     return { content: `client buffer for ${params.path}` }
   }
+
+  async unstable_createElicitation(params: unknown): Promise<ElicitationResponse> {
+    this.elicitations.push(params)
+    return this.nextElicitationResponse
+  }
 }
+
+type ElicitationResponse =
+  | { action: 'accept'; content?: Record<string, string | number | boolean | string[]> }
+  | { action: 'decline' }
+  | { action: 'cancel' }
 
 export class FakePiRpcProcess {
   private handlers: Array<(ev: PiRpcEvent) => void> = []
