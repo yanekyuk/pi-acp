@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { listPiSessions } from '../../src/acp/pi-sessions.js'
+import { listPiSessions, readPiSessionTitle } from '../../src/acp/pi-sessions.js'
 
 // Ensures we still pick up session_info.name even if it is older than the tail window.
 
@@ -46,6 +46,8 @@ test('listPiSessions: finds session_info.name even when it is outside the tail w
   process.env.PI_CODING_AGENT_DIR = root
 
   try {
+    assert.equal(readPiSessionTitle(sessionFile), 'Named Early')
+
     const s = listPiSessions().find(x => x.sessionId === 'sess-1')
     assert.ok(s)
     assert.equal(s?.title, 'Named Early')

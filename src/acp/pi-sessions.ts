@@ -133,7 +133,13 @@ function pickTitleFromTail(tail: string): string | null {
 function scanSessionInfoNameFromFile(path: string): string | null {
   // Fallback when the session_info entry is older than our tail window.
   // Scan the whole file line-by-line and remember the last session_info.name.
-  const fd = openSync(path, 'r')
+  let fd: number
+  try {
+    fd = openSync(path, 'r')
+  } catch {
+    return null
+  }
+
   try {
     const buf = Buffer.alloc(256 * 1024)
     let leftover = ''
@@ -262,6 +268,22 @@ function pickFallbackTitleFromHead(path: string): string | null {
   return null
 }
 
+function readPiSessionTitleWithTail(path: string, tail: string | null): string | null {
+  const titleFromTail = tail ? pickTitleFromTail(tail) : null
+  return titleFromTail ?? scanSessionInfoNameFromFile(path) ?? pickFallbackTitleFromHead(path)
+}
+
+export function readPiSessionTitle(path: string): string | null {
+  let tail: string | null = null
+  try {
+    tail = readTail(path)
+  } catch {
+    // ignore
+  }
+
+  return readPiSessionTitleWithTail(path, tail)
+}
+
 export function listPiSessions(): PiSessionListItem[] {
   const sessionsDir = getPiSessionsDir()
   const files: string[] = []
@@ -276,20 +298,16 @@ export function listPiSessions(): PiSessionListItem[] {
     if (!header) continue
 
     let updatedAt: string | null = null
+    let tail: string | null = null
 
-    let title: string | null = null
     try {
-      const tail = readTail(file)
-      title = pickTitleFromTail(tail)
+      tail = readTail(file)
       updatedAt = pickUpdatedAtFromTail(tail)
     } catch {
       // ignore
     }
 
-    // If the session was named early and grew large, it may fall outside of the tail window.
-    if (!title) {
-      title = scanSessionInfoNameFromFile(file)
-    }
+    const title = readPiSessionTitleWithTail(file, tail)
 
     // Fallback for updatedAt when we couldn't parse timestamps from tail.
     if (!updatedAt) {
@@ -298,10 +316,6 @@ export function listPiSessions(): PiSessionListItem[] {
       } catch {
         updatedAt = null
       }
-    }
-
-    if (!title) {
-      title = pickFallbackTitleFromHead(file)
     }
 
     items.push({
