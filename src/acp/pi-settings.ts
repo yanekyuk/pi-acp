@@ -75,7 +75,7 @@ export function getQuietStartup(cwd: string): boolean {
 }
 
 export function getAutoTitle(cwd: string): boolean {
-  const env = process.env.PI_AUTO_TITLE ?? process.env.PI_ACP_AUTO_TITLE
+  const env = process.env.PI_ACP_AUTO_TITLE ?? process.env.PI_AUTO_TITLE
   if (typeof env === 'string') {
     const val = env.trim().toLowerCase()
     if (val === '0' || val === 'false' || val === 'off' || val === 'no') return false
