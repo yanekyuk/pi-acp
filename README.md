@@ -8,21 +8,29 @@ ACP ([Agent Client Protocol](https://agentclientprotocol.com/overview/introducti
 
 This is an MVP-style adapter intended to be useful today and easy to iterate on. Some ACP features may be not implemented or are not supported (see [Limitations](#limitations)). Development is centered around [Zed](https://zed.dev) editor support, other clients may have varying levels of compatibility.
 
-Expect some minor breaking changes.
+Expect some minor breaking changes. The adapter targets stable ACP v1 using `@agentclientprotocol/sdk` 1.x; draft ACP v2 APIs are not advertised.
 
 ## Features
 
-- Streams assistant output as ACP `agent_message_chunk`
+- Streams assistant output and reasoning as ACP `agent_message_chunk` / `agent_thought_chunk`, with message IDs that let clients group chunks correctly
+- Exposes current Zed composer configuration through ACP `configOptions`
+  - Model selector (`category: "model"`)
+  - Thinking selector (`category: "thought_level"`) with concise labels such as **High**
+- Accepts image, resource-link, and embedded-resource prompt content, enabling Zed's context and image attachments
+- Publishes ACP `usage_update` notifications for context-window and cumulative session-cost UI
 - Maps pi tool execution to ACP `tool_call` / `tool_call_update`
   - Tool call locations are surfaced when available for ACP clients that support opening the referenced file/context
   - Relative file paths from pi are resolved against the session cwd before being emitted as ACP tool locations, which enables follow-along features in clients like Zed
   - For `edit`, `pi-acp` attempts to infer a 1-based line number from a unique `oldText` match in the pre-edit file snapshot and includes it in the emitted tool location when possible
-  - For `edit`, `pi-acp` snapshots the file before the tool runs and emits an ACP **structured diff** (`oldText`/`newText`) on completion when possible
+  - Tool calls include their stable programmatic `name`
+  - For `edit`, `pi-acp` snapshots the file before the tool runs and emits an ACP **structured diff** (`oldText`/`newText`) with an absolute path on completion when possible
 - ACP filesystem delegation (`fs/read_text_file`, `fs/write_text_file`)
   - When the client advertises `fs.writeTextFile`, `pi-acp` loads a small pi extension (`dist/acp-fs-extension.js`) that overrides pi's built-in `read`/`edit`/`write` tools and routes file contents through the ACP client over a local socket. This is what makes editors like Zed list the files edited by the session (Keep All / Reject All), edit against unsaved buffer contents, and follow the agent's location. If the client rejects an operation (e.g. a path outside the open project), the tool falls back to the local filesystem.
-- Session persistence
+- Session persistence and lifecycle
   - pi stores its own sessions in `~/.pi/agent/sessions/...`
-  - `pi-acp` stores a small mapping file at `~/.pi/pi-acp/session-map.json` so `session/load` can reattach to a previous pi session file
+  - `pi-acp` stores a small mapping file at `~/.pi/pi-acp/session-map.json` so `session/load` and `session/resume` can reattach to a previous pi session file
+  - `session/close` releases one live pi subprocess without deleting history; multiple Zed threads can remain live independently
+  - `session/delete` closes an active session before deleting its persisted history
 - Slash commands
   - Loads file-based slash commands compatible with pi’s conventions
   - Adds a small set of built-in commands for headless/editor usage
@@ -33,7 +41,7 @@ Expect some minor breaking changes.
   - Extension dialogs map to ACP: `select`/`confirm` → permission prompts, `input`/`editor` → ACP elicitation (or a chat reply when the client lacks it), `notify`/`setStatus` → tagged messages/metadata
   - The `todo` tool (rpiv-todo) is mirrored into the ACP **plan** view; other well-known extension tools get proper ACP tool kinds and human-readable titles
 - (Zed) `pi-acp` emits “startup info” block into the session (pi version, context, skills, prompts, extensions - similar to `pi` in the terminal). You can disable it by setting `quietStartup: true` in pi settings (`~/.pi/agent/settings.json` or `<project>/.pi/settings.json`). When `quietStartup` is enabled, `pi-acp` will still emit a 'New version available' message if the installed pi version is outdated.
-- (Zed) Session history is supported in Zed starting with [`v0.225.0`](https://zed.dev/releases/preview/0.225.0). Session loading / history maps to pi's session files. Sessions can be resumed both in `pi` and in the ACP client.
+- (Zed) Session history is supported in Zed starting with [`v0.225.0`](https://zed.dev/releases/preview/0.225.0). Session list/load/resume maps to pi's session files, and sessions can be resumed both in `pi` and in the ACP client.
 
 ## Prerequisites
 
@@ -117,8 +125,8 @@ Point your ACP client to the built `dist/index.js`:
 
 ### Environment variables
 
-- `PI_ACP_ENABLE_EMBEDDED_CONTEXT=true` advertises ACP `promptCapabilities.embeddedContext` support to the client.
-- Default: unset/any other value means `false`.
+- Embedded ACP context is enabled by default so clients such as Zed can attach rich context.
+- Set `PI_ACP_ENABLE_EMBEDDED_CONTEXT=false` to opt out.
 - When disabled, compliant ACP clients should avoid sending embedded `resource` blocks. If they send them anyway, `pi-acp` still degrades gracefully by converting them into plain-text prompt context.
 - `PI_ACP_AUTO_TITLE=false` disables automatic title generation after a new session's first prompt. You can also set `autoTitle: false` in pi's global or project `settings.json`. Automatic titles are enabled by default.
 
@@ -131,7 +139,7 @@ You can add the environment variable in the Zed settings with:
       "command": "node",
       "args": ["/path/to/pi-acp/dist/index.js"],
       "env": {
-          "PI_ACP_ENABLE_EMBEDDED_CONTEXT": "true",
+          "PI_ACP_ENABLE_EMBEDDED_CONTEXT": "false",
       }
     }
   }
@@ -165,7 +173,7 @@ Loaded from:
 Other built-in commands:
 
 - `/model` - not implemented (use the model selector UI in Zed)
-- `/thinking` - maps to 'mode' selector in Zed
+- `/thinking` - not implemented (use the ACP thinking selector in Zed)
 - `/clear` - not implemented (use ACP client 'new' command)
 
 #### 3) Skill commands
@@ -239,10 +247,9 @@ Project layout:
 
 - No ACP terminal delegation (`terminal/*`); pi executes commands locally. File reads/writes go through the client only for pi's built-in `read`/`edit`/`write` tools; `bash` and other tools still touch the disk directly.
 - MCP servers are accepted in ACP params and stored in session state, but not wired through to pi in this adapter. If you use [pi MCP adapter](https://github.com/nicobailon/pi-mcp-adapter) it will be available in the ACP client.
-- Assistant streaming is currently sent as `agent_message_chunk` (no separate thought stream).
+- An ACP agent-mode selector such as Zed's native **Write** control is not advertised. Pi's current RPC protocol cannot enforce a meaningful write/read-only tool restriction, and advertising a cosmetic mode would be misleading. Model and thinking selectors are fully backed by Pi RPC.
 - Extension commands that depend on pi's terminal overlay (`ctx.ui.custom()`), e.g. `/btw` or `/mcp setup`, cannot render in ACP clients; pi-acp hides `/btw` and pi reports the limitation for others.
 - Queue is implemented client-side and should work like pi's `one-at-a-time`
-- ~~ACP clients don't yet suport session history, but ACP sessions from `pi-acp` can be `/resume`d in pi directly~~
 
 ## License
 

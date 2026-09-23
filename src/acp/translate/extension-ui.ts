@@ -1,4 +1,4 @@
-import type { CreateElicitationRequest, ElicitationContentValue } from '@agentclientprotocol/sdk'
+import type { CreateElicitationRequest } from '@agentclientprotocol/sdk'
 
 /**
  * Translation helpers for pi's extension UI sub-protocol (`extension_ui_request`)
@@ -49,10 +49,10 @@ export function buildTextElicitation(
 }
 
 /** Extract the text the user entered from an accepted elicitation, or null if absent. */
-export function elicitationTextValue(
-  content: { [key: string]: ElicitationContentValue } | null | undefined
-): string | null {
-  const value = content?.[ELICITATION_TEXT_FIELD]
+export function elicitationTextValue(content: unknown): string | null {
+  if (typeof content !== 'object' || content === null || Array.isArray(content)) return null
+
+  const value = (content as Record<string, unknown>)[ELICITATION_TEXT_FIELD]
   if (typeof value === 'string') return value
   if (typeof value === 'number' || typeof value === 'boolean') return String(value)
   return null

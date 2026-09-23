@@ -57,9 +57,25 @@ test('PiAcpAgent: newSession returns configOptions for model and thinking select
 
     const result = await agent.newSession({ cwd: process.cwd(), mcpServers: [] } as any)
 
-    assert.equal(result.models?.currentModelId, 'test/beta')
+    assert.equal(Object.hasOwn(result, 'models'), false)
     assert.equal(result.modes?.currentModeId, 'high')
     assert.deepEqual(result.configOptions, [
+      {
+        type: 'select',
+        id: 'thought_level',
+        category: 'thought_level',
+        name: 'Thinking',
+        description: 'Set the reasoning effort for this session',
+        currentValue: 'high',
+        options: [
+          { value: 'off', name: 'Off', description: null },
+          { value: 'minimal', name: 'Minimal', description: null },
+          { value: 'low', name: 'Low', description: null },
+          { value: 'medium', name: 'Medium', description: null },
+          { value: 'high', name: 'High', description: null },
+          { value: 'xhigh', name: 'Extra High', description: null }
+        ]
+      },
       {
         type: 'select',
         id: 'model',
@@ -70,22 +86,6 @@ test('PiAcpAgent: newSession returns configOptions for model and thinking select
         options: [
           { value: 'test/alpha', name: 'test/Alpha', description: null },
           { value: 'test/beta', name: 'test/Beta', description: null }
-        ]
-      },
-      {
-        type: 'select',
-        id: 'thought_level',
-        category: 'thought_level',
-        name: 'Thinking',
-        description: 'Set the reasoning effort for this session',
-        currentValue: 'high',
-        options: [
-          { value: 'off', name: 'Thinking: off', description: null },
-          { value: 'minimal', name: 'Thinking: minimal', description: null },
-          { value: 'low', name: 'Thinking: low', description: null },
-          { value: 'medium', name: 'Thinking: medium', description: null },
-          { value: 'high', name: 'Thinking: high', description: null },
-          { value: 'xhigh', name: 'Thinking: xhigh', description: null }
         ]
       }
     ])
@@ -146,7 +146,7 @@ test('PiAcpAgent: setSessionConfigOption maps model changes to pi and emits conf
   ])
 })
 
-test('PiAcpAgent: setSessionConfigOption maps thought level changes to pi and emits sync updates', async () => {
+test('PiAcpAgent: setSessionConfigOption maps thought level changes to pi and emits config sync', async () => {
   const conn = new FakeAgentSideConnection()
   const state = {
     thinkingLevel: 'medium',
@@ -185,13 +185,6 @@ test('PiAcpAgent: setSessionConfigOption maps thought level changes to pi and em
   assert.deepEqual(thinkingLevels, ['xhigh'])
   assert.equal(result.configOptions.find(option => option.id === 'thought_level')?.currentValue, 'xhigh')
   assert.deepEqual(conn.updates, [
-    {
-      sessionId: 's1',
-      update: {
-        sessionUpdate: 'current_mode_update',
-        currentModeId: 'xhigh'
-      }
-    },
     {
       sessionId: 's1',
       update: {

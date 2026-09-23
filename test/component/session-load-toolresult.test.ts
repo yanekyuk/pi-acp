@@ -46,6 +46,7 @@ test('PiAcpAgent: loadSession replays toolResult as tool_call + tool_call_update
     const toolCall = updates.find(u => u?.sessionUpdate === 'tool_call')
     assert.ok(toolCall)
     assert.equal(toolCall.toolCallId, 'call_1')
+    assert.equal(toolCall.name, 'bash')
     assert.equal(toolCall.title, 'echo hello')
     assert.equal(toolCall.kind, 'execute')
     assert.deepEqual(toolCall.content, [{ type: 'terminal', terminalId: 'call_1' }])

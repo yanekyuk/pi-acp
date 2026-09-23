@@ -22,8 +22,8 @@ async function initializeWithEmbeddedContext(value?: string) {
   return res.agentCapabilities.promptCapabilities.embeddedContext
 }
 
-test('PI_ACP_ENABLE_EMBEDDED_CONTEXT: defaults embeddedContext to false when undefined', async () => {
-  assert.equal(await initializeWithEmbeddedContext(), false)
+test('PI_ACP_ENABLE_EMBEDDED_CONTEXT: defaults embeddedContext to true when undefined', async () => {
+  assert.equal(await initializeWithEmbeddedContext(), true)
 })
 
 test("PI_ACP_ENABLE_EMBEDDED_CONTEXT: 'false' keeps embeddedContext disabled", async () => {

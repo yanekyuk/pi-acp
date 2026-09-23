@@ -36,7 +36,7 @@ export class FakeAgentSideConnection {
     return { content: `client buffer for ${params.path}` }
   }
 
-  async unstable_createElicitation(params: unknown): Promise<ElicitationResponse> {
+  async createElicitation(params: unknown): Promise<ElicitationResponse> {
     this.elicitations.push(params)
     return this.nextElicitationResponse
   }
@@ -55,6 +55,7 @@ export class FakePiRpcProcess {
   readonly prompts: Array<{ message: string; attachments: unknown[] }> = []
   readonly extensionUiResponses: unknown[] = []
   abortCount = 0
+  disposeCount = 0
 
   onEvent(handler: (ev: PiRpcEvent) => void): () => void {
     this.handlers.push(handler)
@@ -75,6 +76,10 @@ export class FakePiRpcProcess {
     this.abortCount += 1
   }
 
+  dispose(): void {
+    this.disposeCount += 1
+  }
+
   async sendExtensionUiResponse(response: unknown): Promise<void> {
     this.extensionUiResponses.push(response)
   }
@@ -89,6 +94,13 @@ export class FakePiRpcProcess {
 
   async getMessages(): Promise<any> {
     return { messages: [] }
+  }
+
+  async getSessionStats(): Promise<any> {
+    return {
+      cost: 0,
+      contextUsage: { tokens: 0, contextWindow: 128_000 }
+    }
   }
 }
 

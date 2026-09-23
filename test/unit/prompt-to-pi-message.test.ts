@@ -9,7 +9,27 @@ test('promptToPiMessage: concatenates text and resource links', () => {
     { type: 'text', text: ' world' }
   ])
 
-  assert.equal(message, 'Hello\n[Context] file:///tmp/foo.txt world')
+  assert.equal(message, 'Hello\n[Context] foo: file:///tmp/foo.txt world')
+  assert.deepEqual(images, [])
+})
+
+test('promptToPiMessage: includes resource link metadata', () => {
+  const { message, images } = promptToPiMessage([
+    {
+      type: 'resource_link',
+      uri: 'file:///tmp/guide.md',
+      name: 'guide.md',
+      title: 'Project guide',
+      description: 'Instructions for this project',
+      mimeType: 'text/markdown',
+      size: 42
+    }
+  ])
+
+  assert.equal(
+    message,
+    '\n[Context] Project guide (guide.md, text/markdown, 42 bytes): file:///tmp/guide.md — Instructions for this project'
+  )
   assert.deepEqual(images, [])
 })
 

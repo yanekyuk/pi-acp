@@ -29,6 +29,7 @@ import {
 import { toolResultToText } from './translate/pi-tools.js'
 import { toToolKind, toToolTitle } from './translate/extension-tools.js'
 import { TODO_TOOL_NAME, todoResultToPlan } from './translate/plan.js'
+import { sessionStatsToUsageUpdate } from './translate/usage.js'
 import {
   buildTextElicitation,
   elicitationTextValue,
@@ -39,7 +40,7 @@ import {
 
 /** Client-side ACP capabilities that change how pi extension UI requests are rendered. */
 export type ClientUiCapabilities = {
-  /** Client advertised `clientCapabilities.elicitation.form` (unstable ACP). */
+  /** Client advertised `clientCapabilities.elicitation.form`. */
   elicitationForm: boolean
 }
 
@@ -183,6 +184,15 @@ function toToolCallLocations(args: unknown, cwd: string, line?: number): ToolCal
   return [{ path: resolvedPath, ...(typeof line === 'number' ? { line } : {}) }]
 }
 
+function assistantMessageId(message: unknown): string {
+  const record = message as { id?: unknown; messageId?: unknown; responseId?: unknown } | null
+  for (const candidate of [record?.id, record?.messageId, record?.responseId]) {
+    if (typeof candidate === 'string' && candidate) return candidate
+  }
+
+  return crypto.randomUUID()
+}
+
 export class SessionManager {
   private sessions = new Map<string, PiAcpSession>()
   private readonly store = new SessionStore()
@@ -210,14 +220,6 @@ export class SessionManager {
       // ignore
     }
     this.sessions.delete(sessionId)
-  }
-
-  /** Close all sessions except the one with `keepSessionId`. */
-  closeAllExcept(keepSessionId: string): void {
-    for (const [id] of this.sessions) {
-      if (id === keepSessionId) continue
-      this.close(id)
-    }
   }
 
   async create(params: SessionCreateParams): Promise<PiAcpSession> {
@@ -329,6 +331,9 @@ export class PiAcpSession {
   private currentToolCalls = new Map<string, 'pending' | 'in_progress'>()
   // Tool name per in-flight tool call, for events that omit it.
   private toolCallNames = new Map<string, string>()
+
+  // ACP message identity for the current pi assistant message stream.
+  private currentAssistantMessageId: string | null = null
 
   // pi can emit multiple `turn_end` and `agent_end` events for a single user prompt
   // when retry, compaction, or queued continuations run. The session-level prompt
@@ -517,6 +522,19 @@ export class PiAcpSession {
     return this.cancelRequested
   }
 
+  async emitUsageUpdate(fallbackUsed?: number): Promise<void> {
+    try {
+      const stats = await this.proc.getSessionStats()
+      const usage = sessionStatsToUsageUpdate(stats, fallbackUsed)
+      if (!usage) return
+
+      this.emit({ sessionUpdate: 'usage_update', ...usage })
+      await this.flushEmits()
+    } catch {
+      // Usage is advisory and must not fail session lifecycle or prompt requests.
+    }
+  }
+
   private emit(update: SessionUpdate): void {
     // Serialize update delivery.
     this.lastEmit = this.lastEmit
@@ -549,6 +567,7 @@ export class PiAcpSession {
     this.emit({
       sessionUpdate: params.sessionUpdate,
       toolCallId: params.toolCallId,
+      name: params.toolName,
       title: bashCommand(params.args) ?? params.toolName,
       kind: 'execute',
       status: params.status,
@@ -703,13 +722,24 @@ export class PiAcpSession {
     }
 
     switch (type) {
+      case 'message_start': {
+        const message = (ev as any).message
+        if (message?.role === 'assistant') {
+          this.currentAssistantMessageId = assistantMessageId(message)
+        }
+        break
+      }
+
       case 'message_update': {
         const ame = (ev as any).assistantMessageEvent
+        const messageId = this.currentAssistantMessageId ?? assistantMessageId(ame?.partial)
+        this.currentAssistantMessageId = messageId
 
         // Stream assistant text.
         if (ame?.type === 'text_delta' && typeof ame.delta === 'string') {
           this.emit({
             sessionUpdate: 'agent_message_chunk',
+            messageId,
             content: { type: 'text', text: ame.delta } satisfies ContentBlock
           })
           break
@@ -718,6 +748,7 @@ export class PiAcpSession {
         if (ame?.type === 'thinking_delta' && typeof ame.delta === 'string') {
           this.emit({
             sessionUpdate: 'agent_thought_chunk',
+            messageId,
             content: { type: 'text', text: ame.delta } satisfies ContentBlock
           })
           break
@@ -771,6 +802,7 @@ export class PiAcpSession {
               this.emit({
                 sessionUpdate: 'tool_call',
                 toolCallId,
+                name: toolName,
                 title: toToolTitle(toolName, rawInput),
                 kind: toToolKind(toolName),
                 status,
@@ -855,6 +887,7 @@ export class PiAcpSession {
           this.emit({
             sessionUpdate: 'tool_call',
             toolCallId,
+            name: toolName,
             title: toToolTitle(toolName, args),
             kind: toToolKind(toolName),
             status: 'in_progress',
@@ -932,7 +965,7 @@ export class PiAcpSession {
               content = [
                 {
                   type: 'diff',
-                  path: snapshot.path,
+                  path: abs,
                   oldText: snapshot.oldText,
                   newText
                 }
@@ -1008,6 +1041,8 @@ export class PiAcpSession {
             text: 'Automatic compaction finished; context was summarized to continue the session.'
           } satisfies ContentBlock
         })
+        const estimatedTokensAfter = Number((ev as any).result?.estimatedTokensAfter)
+        void this.emitUsageUpdate(Number.isFinite(estimatedTokensAfter) ? estimatedTokensAfter : undefined)
         break
       }
 
@@ -1030,15 +1065,21 @@ export class PiAcpSession {
       }
 
       case 'agent_settled': {
-        // Ensure all updates derived from pi events are delivered before we resolve
-        // the ACP `session/prompt` request.
-        this.finishTurn(this.cancelRequested ? 'cancelled' : 'end_turn')
+        // Include final context/cost state before resolving the ACP prompt turn.
+        void this.emitUsageUpdate().finally(() => {
+          this.finishTurn(this.cancelRequested ? 'cancelled' : 'end_turn')
+        })
         break
       }
 
       case 'message_end': {
-        // Extensions (e.g. pi-subagents run notices) inject `custom` messages via pi.sendMessage().
         const message = (ev as any).message
+        if (message?.role === 'assistant') {
+          this.currentAssistantMessageId = null
+          break
+        }
+
+        // Extensions (e.g. pi-subagents run notices) inject `custom` messages via pi.sendMessage().
         if (message?.role !== 'custom' || message?.display === false) break
 
         const text = customMessageText(message.content)
@@ -1146,14 +1187,14 @@ export class PiAcpSession {
   }
 
   private async elicitTextInput(ev: PiRpcEvent, id: string, method: TextInputMethod): Promise<void> {
-    let response: Awaited<ReturnType<AgentSideConnection['unstable_createElicitation']>>
+    let response: Awaited<ReturnType<AgentSideConnection['createElicitation']>>
     try {
-      response = await this.conn.unstable_createElicitation({
+      response = await this.conn.createElicitation({
         ...buildTextElicitation(ev, method),
         sessionId: this.sessionId
       })
     } catch {
-      // Client rejected the unstable method; fall back to the chat reply flow.
+      // Client rejected elicitation; fall back to the chat reply flow.
       await this.requestChatInput(ev, id, method)
       return
     }
@@ -1261,6 +1302,7 @@ function extensionUiToolCall(id: string, ev: PiRpcEvent) {
   return {
     toolCallId: `pi-ui-${id}`,
     title,
+    name: method,
     kind: 'other' as const,
     status: 'pending' as const,
     rawInput

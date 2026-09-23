@@ -19,10 +19,18 @@ export function promptToPiMessage(blocks: ContentBlock[]): {
         message += b.text
         break
 
-      case 'resource_link':
-        // A lightweight, human-readable hint for the LLM.
-        message += `\n[Context] ${b.uri}`
+      case 'resource_link': {
+        const label = b.title ?? b.name
+        const details = [
+          b.title && b.name !== b.title ? b.name : null,
+          b.mimeType,
+          typeof b.size === 'number' ? `${b.size} bytes` : null
+        ].filter((value): value is string => Boolean(value))
+        const detailText = details.length ? ` (${details.join(', ')})` : ''
+        const description = b.description ? ` — ${b.description}` : ''
+        message += `\n[Context] ${label}${detailText}: ${b.uri}${description}`
         break
+      }
 
       case 'image': {
         // pi expects base64 image bytes in `data` without a data-url prefix.
@@ -35,17 +43,14 @@ export function promptToPiMessage(blocks: ContentBlock[]): {
       }
 
       case 'resource': {
-        // Clients should not send this if embeddedContext=false, but be resilient.
-        const r: any = (b as any).resource
-        const uri = typeof r?.uri === 'string' ? r.uri : '(unknown)'
+        const r = b.resource
+        const uri = r.uri
 
-        if (typeof r?.text === 'string') {
-          // TextResourceContents
-          const mime = typeof r?.mimeType === 'string' ? r.mimeType : 'text/plain'
+        if ('text' in r) {
+          const mime = typeof r.mimeType === 'string' ? r.mimeType : 'text/plain'
           message += `\n[Embedded Context] ${uri} (${mime})\n${r.text}`
-        } else if (typeof r?.blob === 'string') {
-          // BlobResourceContents
-          const mime = typeof r?.mimeType === 'string' ? r.mimeType : 'application/octet-stream'
+        } else if ('blob' in r) {
+          const mime = typeof r.mimeType === 'string' ? r.mimeType : 'application/octet-stream'
           const bytes = Buffer.byteLength(r.blob, 'base64')
           message += `\n[Embedded Context] ${uri} (${mime}, ${bytes} bytes)`
         } else {

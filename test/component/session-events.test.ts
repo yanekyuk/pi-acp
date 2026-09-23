@@ -19,6 +19,7 @@ test('PiAcpSession: emits agent_message_chunk for text_delta', async () => {
     fileCommands: []
   })
 
+  proc.emit({ type: 'message_start', message: { role: 'assistant', id: 'assistant-1' } })
   proc.emit({
     type: 'message_update',
     assistantMessageEvent: { type: 'text_delta', delta: 'hi' }
@@ -30,6 +31,7 @@ test('PiAcpSession: emits agent_message_chunk for text_delta', async () => {
   assert.equal(conn.updates[0]!.sessionId, 's1')
   assert.deepEqual(conn.updates[0]!.update, {
     sessionUpdate: 'agent_message_chunk',
+    messageId: 'assistant-1',
     content: { type: 'text', text: 'hi' }
   })
 })
@@ -47,6 +49,7 @@ test('PiAcpSession: emits agent_thought_chunk for thinking_delta', async () => {
     fileCommands: []
   })
 
+  proc.emit({ type: 'message_start', message: { role: 'assistant', id: 'assistant-1' } })
   proc.emit({
     type: 'message_update',
     assistantMessageEvent: { type: 'thinking_delta', delta: 'thinking...' }
@@ -58,6 +61,7 @@ test('PiAcpSession: emits agent_thought_chunk for thinking_delta', async () => {
   assert.equal(conn.updates[0]!.sessionId, 's1')
   assert.deepEqual(conn.updates[0]!.update, {
     sessionUpdate: 'agent_thought_chunk',
+    messageId: 'assistant-1',
     content: { type: 'text', text: 'thinking...' }
   })
 })
@@ -94,6 +98,7 @@ test('PiAcpSession: emits tool_call + tool_call_update + completes', async () =>
 
   assert.equal(conn.updates[0]!.update.sessionUpdate, 'tool_call')
   assert.equal((conn.updates[0]!.update as any).toolCallId, 't1')
+  assert.equal((conn.updates[0]!.update as any).name, 'bash')
   assert.equal((conn.updates[0]!.update as any).title, 'ls')
   assert.equal((conn.updates[0]!.update as any).kind, 'execute')
   assert.equal((conn.updates[0]!.update as any).status, 'in_progress')
@@ -176,6 +181,7 @@ test('PiAcpSession: handles extension select via ACP permission request', async 
     toolCall: {
       toolCallId: 'pi-ui-ui-1',
       title: 'Pick one',
+      name: 'select',
       kind: 'other',
       status: 'pending',
       rawInput: { method: 'select', title: 'Pick one', options: ['Alpha', 'Beta'] }
@@ -522,18 +528,32 @@ test('PiAcpSession: emits agent_message_chunk for auto_compaction_end', async ()
     fileCommands: []
   })
 
-  proc.emit({ type: 'auto_compaction_end' } as any)
+  proc.getSessionStats = async () => ({
+    cost: 0.25,
+    contextUsage: { tokens: null, contextWindow: 128_000 }
+  })
+  proc.emit({ type: 'auto_compaction_end', result: { estimatedTokensAfter: 4_000 } } as any)
 
   await new Promise(r => setTimeout(r, 0))
 
-  assert.equal(conn.updates.length, 1)
-  assert.deepEqual(conn.updates[0]!.update, {
-    sessionUpdate: 'agent_message_chunk',
-    content: {
-      type: 'text',
-      text: 'Automatic compaction finished; context was summarized to continue the session.'
-    }
-  })
+  assert.deepEqual(
+    conn.updates.map(update => update.update),
+    [
+      {
+        sessionUpdate: 'agent_message_chunk',
+        content: {
+          type: 'text',
+          text: 'Automatic compaction finished; context was summarized to continue the session.'
+        }
+      },
+      {
+        sessionUpdate: 'usage_update',
+        used: 4_000,
+        size: 128_000,
+        cost: { amount: 0.25, currency: 'USD' }
+      }
+    ]
+  )
 })
 
 test('PiAcpSession: preserves ordering when auto_retry_start is interleaved with text_delta events', async () => {
@@ -549,6 +569,7 @@ test('PiAcpSession: preserves ordering when auto_retry_start is interleaved with
     fileCommands: []
   })
 
+  proc.emit({ type: 'message_start', message: { role: 'assistant', id: 'assistant-1' } })
   proc.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'before ' } })
   proc.emit({ type: 'auto_retry_start', attempt: 1, maxAttempts: 2, delayMs: 2000 } as any)
   proc.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'after' } })
@@ -558,12 +579,20 @@ test('PiAcpSession: preserves ordering when auto_retry_start is interleaved with
   assert.deepEqual(
     conn.updates.map(u => u.update),
     [
-      { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'before ' } },
+      {
+        sessionUpdate: 'agent_message_chunk',
+        messageId: 'assistant-1',
+        content: { type: 'text', text: 'before ' }
+      },
       {
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: 'Retrying (attempt 1/2, waiting 2s)...' }
       },
-      { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'after' } }
+      {
+        sessionUpdate: 'agent_message_chunk',
+        messageId: 'assistant-1',
+        content: { type: 'text', text: 'after' }
+      }
     ]
   )
 })
