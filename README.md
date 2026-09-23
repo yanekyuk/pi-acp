@@ -120,6 +120,7 @@ Point your ACP client to the built `dist/index.js`:
 - `PI_ACP_ENABLE_EMBEDDED_CONTEXT=true` advertises ACP `promptCapabilities.embeddedContext` support to the client.
 - Default: unset/any other value means `false`.
 - When disabled, compliant ACP clients should avoid sending embedded `resource` blocks. If they send them anyway, `pi-acp` still degrades gracefully by converting them into plain-text prompt context.
+- `PI_ACP_AUTO_TITLE=false` disables automatic title generation after a new session's first prompt. You can also set `autoTitle: false` in pi's global or project `settings.json`. Automatic titles are enabled by default.
 
 You can add the environment variable in the Zed settings with:
 
@@ -154,6 +155,8 @@ Loaded from:
 - `/export` – export the current session to HTML in the session `cwd`
 - `/session` – show session stats (tokens/messages/cost/session file)
 - `/name <name>` – set session display name
+- `/title <name>` – set the session title manually
+- `/title regenerate` or `/regenerate-title` – regenerate the session title using the active model
 - `/queue all|one-at-a-time` – set pi queue mode (unstable feature)
 - `/changelog` – print the installed pi changelog (best-effort)
 - `/steering` - maps to `pi` Steering Mode, get/set
