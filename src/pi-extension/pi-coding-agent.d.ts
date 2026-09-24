@@ -1,5 +1,5 @@
 /**
- * Minimal typings for the parts of pi's extension API used by acp-fs.ts.
+ * Minimal typings for the parts of pi's extension API used by pi-acp extensions.
  *
  * The extension runs inside the pi subprocess, where pi aliases this module
  * specifier to its own installation, so pi-acp does not depend on the package.
@@ -34,7 +34,16 @@ declare module '@earendil-works/pi-coding-agent' {
   export function createEditToolDefinition(cwd: string, options?: { operations?: EditOperations }): ToolDefinition
   export function createWriteToolDefinition(cwd: string, options?: { operations?: WriteOperations }): ToolDefinition
 
+  export interface ExtensionContext {
+    model?: { provider: string }
+    modelRegistry: { isUsingOAuth(model: { provider: string }): boolean }
+  }
+
   export interface ExtensionAPI {
     registerTool(tool: ToolDefinition): void
+    on(
+      event: 'before_provider_request',
+      handler: (event: { payload: unknown }, ctx: ExtensionContext) => unknown
+    ): () => void
   }
 }

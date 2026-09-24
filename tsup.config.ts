@@ -20,10 +20,12 @@ export default defineConfig([
     }
   },
   {
-    // pi extension loaded into the pi subprocess (see src/pi-rpc/fs-bridge.ts).
-    // pi aliases @earendil-works/pi-coding-agent to its own installation at load time.
+    // Extensions loaded into the pi subprocess; pi aliases its own coding-agent installation.
     ...shared,
-    entry: { 'acp-fs-extension': 'src/pi-extension/acp-fs.ts' },
+    entry: {
+      'acp-fs-extension': 'src/pi-extension/acp-fs.ts',
+      'anthropic-oauth-extension': 'src/pi-extension/anthropic-oauth.ts'
+    },
     external: ['@earendil-works/pi-coding-agent']
   }
 ])
