@@ -52,6 +52,48 @@ test('PiAcpSession: emits agent_message_chunk for text_delta', async () => {
   })
 })
 
+test('PiAcpSession: preserves Markdown and Mermaid fences across streamed assistant chunks', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  proc.emit({ type: 'message_start', message: { role: 'assistant', id: 'markdown-reply' } })
+  for (const delta of ['# Heading\n\n- **bold', '** item\n- `code`\n\n```mer', 'maid\nflowchart LR\n  A --> B\n```']) {
+    proc.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta } })
+  }
+
+  await new Promise(resolve => setTimeout(resolve, 0))
+
+  assert.deepEqual(
+    conn.updates.map(({ update }) => update),
+    [
+      {
+        sessionUpdate: 'agent_message_chunk',
+        messageId: 'markdown-reply',
+        content: { type: 'text', text: '# Heading\n\n- **bold' }
+      },
+      {
+        sessionUpdate: 'agent_message_chunk',
+        messageId: 'markdown-reply',
+        content: { type: 'text', text: '** item\n- `code`\n\n```mer' }
+      },
+      {
+        sessionUpdate: 'agent_message_chunk',
+        messageId: 'markdown-reply',
+        content: { type: 'text', text: 'maid\nflowchart LR\n  A --> B\n```' }
+      }
+    ]
+  )
+})
+
 test('PiAcpSession: emits agent_thought_chunk for thinking_delta', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()

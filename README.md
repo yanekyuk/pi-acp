@@ -12,7 +12,7 @@ Expect some minor breaking changes. The adapter targets stable ACP v1 using `@ag
 
 ## Features
 
-- Streams assistant output and reasoning as ACP `agent_message_chunk` / `agent_thought_chunk`, with message IDs that let clients group chunks correctly
+- Streams assistant output and reasoning as ACP `agent_message_chunk` / `agent_thought_chunk`, with message IDs that let clients group chunks correctly. Markdown in assistant replies, including fenced `mermaid` diagrams, is forwarded unchanged as text; clients such as Zed render it (there is no separate ACP Markdown message type).
 - Exposes current Zed composer configuration through ACP `configOptions`
   - Model selector (`category: "model"`)
   - Thinking selector (`category: "thought_level"`) with concise labels such as **High**
