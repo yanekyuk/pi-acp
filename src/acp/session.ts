@@ -31,12 +31,15 @@ import { toToolKind, toToolTitle } from './translate/extension-tools.js'
 import { TODO_TOOL_NAME, todoResultToPlan } from './translate/plan.js'
 import { sessionStatsToUsageUpdate } from './translate/usage.js'
 import {
+  buildSelectElicitation,
   buildTextElicitation,
+  elicitationSelectedOption,
   elicitationTextValue,
   formatChatInputPrompt,
   formatSelectPrompt,
   parseExtensionCommandName,
   selectOptionLabel,
+  uiRequestPrompt,
   type TextInputMethod
 } from './translate/extension-ui.js'
 
@@ -1236,6 +1239,34 @@ export class PiAcpSession {
       return
     }
 
+    if (this.clientUi.elicitationForm) {
+      await this.elicitSelect(ev, id, options)
+      return
+    }
+
+    await this.requestSelectPermission(ev, id, options)
+  }
+
+  /** Form elicitation renders each choice as a wrapping row with its full description. */
+  private async elicitSelect(ev: PiRpcEvent, id: string, options: string[]): Promise<void> {
+    let response: Awaited<ReturnType<AgentSideConnection['createElicitation']>>
+    try {
+      response = await this.conn.createElicitation({
+        ...buildSelectElicitation(ev, options),
+        sessionId: this.sessionId
+      })
+    } catch {
+      // Client rejected elicitation; fall back to permission buttons.
+      await this.requestSelectPermission(ev, id, options)
+      return
+    }
+
+    const value = response.action === 'accept' ? elicitationSelectedOption(response.content, options) : null
+    await this.proc.sendExtensionUiResponse(value === null ? { id, cancelled: true } : { id, value })
+  }
+
+  /** Permission buttons cannot wrap, so they carry short labels and the prompt lists full options. */
+  private async requestSelectPermission(ev: PiRpcEvent, id: string, options: string[]): Promise<void> {
     const permissionOptions: PermissionOption[] = options.map((option, index) => ({
       optionId: `${CHOICE_OPTION_PREFIX}${index}`,
       name: selectOptionLabel(option),
@@ -1314,10 +1345,7 @@ function extensionUiToolTitle(method: string): string {
 }
 
 function extensionUiPrompt(ev: PiRpcEvent): string {
-  const title = stringProp(ev, 'title')?.trim() ?? ''
-  const message = stringProp(ev, 'message')?.trim() ?? ''
-
-  const prompt = title && message && title !== message ? `${title}\n\n${message}` : title || message
+  const prompt = uiRequestPrompt(ev)
   if (stringProp(ev, 'method') !== 'select' || !Array.isArray(ev.options)) return prompt
 
   return formatSelectPrompt(

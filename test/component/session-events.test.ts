@@ -458,6 +458,97 @@ test('PiAcpSession: keeps full select choices readable without changing Pi selec
   assert.deepEqual(proc.extensionUiResponses, [{ id: 'ui-choices', value: options[1] }])
 })
 
+test('PiAcpSession: select UI requests use ACP elicitation with full option descriptions', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  const options = [
+    'Blue-green (Recommended) — Run two identical environments and switch traffic atomically',
+    'Canary',
+    'Type something.'
+  ]
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: [],
+    clientUi: { elicitationForm: true }
+  })
+
+  conn.nextElicitationResponse = { action: 'accept', content: { value: '0' } }
+  proc.emit({ type: 'extension_ui_request', id: 'ui-s1', method: 'select', title: '[Deploy] Which strategy?', options })
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.deepEqual(conn.elicitations[0], {
+    mode: 'form',
+    sessionId: 's1',
+    message: '[Deploy] Which strategy?',
+    requestedSchema: {
+      type: 'object',
+      properties: {
+        value: {
+          type: 'string',
+          title: 'Choose one',
+          oneOf: [
+            {
+              const: '0',
+              title: 'Blue-green (Recommended)',
+              description: 'Run two identical environments and switch traffic atomically'
+            },
+            { const: '1', title: 'Canary' },
+            { const: '2', title: 'Type something.' }
+          ]
+        }
+      },
+      required: ['value']
+    },
+    _meta: { piAcp: { method: 'select' } }
+  })
+  assert.equal(conn.permissionRequests.length, 0)
+  // Pi receives the original option string, not the display title.
+  assert.deepEqual(proc.extensionUiResponses, [{ id: 'ui-s1', value: options[0] }])
+
+  conn.nextElicitationResponse = { action: 'decline' }
+  proc.emit({ type: 'extension_ui_request', id: 'ui-s2', method: 'select', title: 'Again?', options })
+  await new Promise(r => setTimeout(r, 0))
+
+  conn.nextElicitationResponse = { action: 'accept', content: { value: '7' } }
+  proc.emit({ type: 'extension_ui_request', id: 'ui-s3', method: 'select', title: 'Again?', options })
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.deepEqual(proc.extensionUiResponses.slice(1), [
+    { id: 'ui-s2', cancelled: true },
+    { id: 'ui-s3', cancelled: true }
+  ])
+})
+
+test('PiAcpSession: select falls back to permission buttons when the client rejects elicitation', async () => {
+  const conn = new FakeAgentSideConnection()
+  conn.createElicitation = async () => {
+    throw new Error('elicitation unsupported')
+  }
+  conn.nextPermissionResponse = { outcome: { outcome: 'selected', optionId: 'choice-1' } }
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: [],
+    clientUi: { elicitationForm: true }
+  })
+
+  proc.emit({ type: 'extension_ui_request', id: 'ui-f', method: 'select', title: 'Pick', options: ['Alpha', 'Beta'] })
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.equal(conn.permissionRequests.length, 1)
+  assert.deepEqual(proc.extensionUiResponses, [{ id: 'ui-f', value: 'Beta' }])
+})
+
 test('PiAcpSession: handles extension confirm via ACP permission request', async () => {
   const conn = new FakeAgentSideConnection()
   conn.nextPermissionResponse = { outcome: { outcome: 'selected', optionId: 'no' } }
