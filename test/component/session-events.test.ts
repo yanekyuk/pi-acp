@@ -395,6 +395,69 @@ test('PiAcpSession: puts the full extension select question in wrapping permissi
   assert.deepEqual(proc.extensionUiResponses, [{ id: 'ui-1', value: 'Beta' }])
 })
 
+test('PiAcpSession: keeps full select choices readable without changing Pi selection values', async () => {
+  const conn = new FakeAgentSideConnection()
+  conn.nextPermissionResponse = { outcome: { outcome: 'selected', optionId: 'choice-1' } }
+  const proc = new FakePiRpcProcess()
+  const options = [
+    '1. Agent + account (Recommended) — Onboarding/profile, signal preparation, and account setup',
+    '2. Agent + matches — Signal preparation/pause, agent questions, radar, and match review',
+    '3. Type something.'
+  ]
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  proc.emit({
+    type: 'extension_ui_request',
+    id: 'ui-choices',
+    method: 'select',
+    title: '[CLI journeys] Which macOS journeys should the CLI support end to end?',
+    options
+  })
+
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.deepEqual(conn.permissionRequests[0], {
+    sessionId: 's1',
+    toolCall: {
+      toolCallId: 'pi-ui-ui-choices',
+      title: 'Choose an option',
+      name: 'select',
+      kind: 'other',
+      status: 'pending',
+      content: [
+        {
+          type: 'content',
+          content: {
+            type: 'text',
+            text:
+              '[CLI journeys] Which macOS journeys should the CLI support end to end?\n\nOptions:\n' +
+              options.join('\n')
+          }
+        }
+      ],
+      rawInput: {
+        method: 'select',
+        title: '[CLI journeys] Which macOS journeys should the CLI support end to end?',
+        options
+      }
+    },
+    options: [
+      { optionId: 'choice-0', name: '1. Agent + account (Recommended)', kind: 'allow_once' },
+      { optionId: 'choice-1', name: '2. Agent + matches', kind: 'allow_once' },
+      { optionId: 'choice-2', name: '3. Type something.', kind: 'allow_once' }
+    ]
+  })
+  assert.deepEqual(proc.extensionUiResponses, [{ id: 'ui-choices', value: options[1] }])
+})
+
 test('PiAcpSession: handles extension confirm via ACP permission request', async () => {
   const conn = new FakeAgentSideConnection()
   conn.nextPermissionResponse = { outcome: { outcome: 'selected', optionId: 'no' } }

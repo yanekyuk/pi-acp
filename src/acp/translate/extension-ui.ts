@@ -7,6 +7,20 @@ import type { CreateElicitationRequest } from '@agentclientprotocol/sdk'
 
 export type TextInputMethod = 'input' | 'editor'
 
+/** Keep the concise choice on the permission button; Pi still receives the original string. */
+export function selectOptionLabel(option: string): string {
+  const separator = option.search(/\s+[—–]\s+/)
+  return separator < 0 ? option : option.slice(0, separator)
+}
+
+/** Permission buttons do not wrap in ACP clients, so show the full choices in the wrapping body. */
+export function formatSelectPrompt(prompt: string, options: string[]): string {
+  if (!options.some(option => selectOptionLabel(option) !== option)) return prompt
+
+  const lines = options.map(option => (/^\d+\.\s/.test(option) ? option : `- ${option}`))
+  return [prompt, `Options:\n${lines.join('\n')}`].filter(Boolean).join('\n\n')
+}
+
 /** Property name used for the single text field in pi input/editor elicitations. */
 export const ELICITATION_TEXT_FIELD = 'value'
 

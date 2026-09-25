@@ -34,7 +34,9 @@ import {
   buildTextElicitation,
   elicitationTextValue,
   formatChatInputPrompt,
+  formatSelectPrompt,
   parseExtensionCommandName,
+  selectOptionLabel,
   type TextInputMethod
 } from './translate/extension-ui.js'
 
@@ -1234,9 +1236,9 @@ export class PiAcpSession {
       return
     }
 
-    const permissionOptions: PermissionOption[] = options.map((name, index) => ({
+    const permissionOptions: PermissionOption[] = options.map((option, index) => ({
       optionId: `${CHOICE_OPTION_PREFIX}${index}`,
-      name,
+      name: selectOptionLabel(option),
       kind: 'allow_once'
     }))
 
@@ -1315,8 +1317,13 @@ function extensionUiPrompt(ev: PiRpcEvent): string {
   const title = stringProp(ev, 'title')?.trim() ?? ''
   const message = stringProp(ev, 'message')?.trim() ?? ''
 
-  if (title && message && title !== message) return `${title}\n\n${message}`
-  return title || message
+  const prompt = title && message && title !== message ? `${title}\n\n${message}` : title || message
+  if (stringProp(ev, 'method') !== 'select' || !Array.isArray(ev.options)) return prompt
+
+  return formatSelectPrompt(
+    prompt,
+    ev.options.map(option => String(option))
+  )
 }
 
 function stringProp(source: Record<string, unknown>, key: string): string | null {
