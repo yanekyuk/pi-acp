@@ -15,7 +15,7 @@ function omitIntegerBounds(schema: unknown): unknown {
   )
 }
 
-export function normalizeAnthropicOauthToolSchemas(payload: unknown): unknown {
+export function normalizeAnthropicToolSchemas(payload: unknown): unknown {
   if (!isObject(payload) || !Array.isArray(payload.tools)) return payload
 
   return {
@@ -27,10 +27,9 @@ export function normalizeAnthropicOauthToolSchemas(payload: unknown): unknown {
   }
 }
 
-export default function anthropicOauthExtension(pi: ExtensionAPI): void {
+export default function anthropicToolSchemaExtension(pi: ExtensionAPI): void {
   pi.on('before_provider_request', (event, ctx) => {
-    const model = ctx.model
-    if (!model || model.provider !== 'anthropic' || !ctx.modelRegistry.isUsingOAuth(model)) return
-    return normalizeAnthropicOauthToolSchemas(event.payload)
+    if (ctx.model?.provider !== 'anthropic') return
+    return normalizeAnthropicToolSchemas(event.payload)
   })
 }

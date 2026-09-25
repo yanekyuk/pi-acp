@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
-import anthropicOauthExtension, { normalizeAnthropicOauthToolSchemas } from '../../src/pi-extension/anthropic-oauth.js'
+import anthropicToolSchemaExtension, {
+  normalizeAnthropicToolSchemas
+} from '../../src/pi-extension/anthropic-tool-schema.js'
 
 const payload = {
   model: 'claude-opus-5-5',
@@ -26,7 +28,7 @@ const payload = {
 }
 
 test('removes integer bounds from outgoing tool schemas without changing Pi tool definitions', () => {
-  const normalized = normalizeAnthropicOauthToolSchemas(payload) as typeof payload
+  const normalized = normalizeAnthropicToolSchemas(payload) as typeof payload
 
   assert.deepEqual(normalized.tools[0].input_schema, {
     type: 'object',
@@ -52,11 +54,11 @@ test('removes integer bounds from outgoing tool schemas without changing Pi tool
 
 test('ignores payloads without an Anthropic tool list', () => {
   const payloadWithoutTools = { model: 'claude-opus-5-5' }
-  assert.equal(normalizeAnthropicOauthToolSchemas(payloadWithoutTools), payloadWithoutTools)
-  assert.equal(normalizeAnthropicOauthToolSchemas(null), null)
+  assert.equal(normalizeAnthropicToolSchemas(payloadWithoutTools), payloadWithoutTools)
+  assert.equal(normalizeAnthropicToolSchemas(null), null)
 })
 
-test('only normalizes requests for an Anthropic OAuth model', () => {
+test('normalizes Anthropic requests with OAuth or API key, but not other providers', () => {
   let handler: ((event: { payload: unknown }, ctx: ExtensionContext) => unknown) | undefined
   const pi: ExtensionAPI = {
     registerTool() {},
@@ -66,7 +68,7 @@ test('only normalizes requests for an Anthropic OAuth model', () => {
       return () => {}
     }
   }
-  anthropicOauthExtension(pi)
+  anthropicToolSchemaExtension(pi)
   assert.ok(handler)
 
   const context = (provider: string, isOAuth: boolean): ExtensionContext => ({
@@ -75,7 +77,7 @@ test('only normalizes requests for an Anthropic OAuth model', () => {
   })
 
   assert.equal(handler({ payload }, context('openai-codex', true)), undefined)
-  assert.equal(handler({ payload }, context('anthropic', false)), undefined)
   assert.equal(handler({ payload }, { ...context('anthropic', true), model: undefined }), undefined)
-  assert.deepEqual(handler({ payload }, context('anthropic', true)), normalizeAnthropicOauthToolSchemas(payload))
+  assert.deepEqual(handler({ payload }, context('anthropic', true)), normalizeAnthropicToolSchemas(payload))
+  assert.deepEqual(handler({ payload }, context('anthropic', false)), normalizeAnthropicToolSchemas(payload))
 })

@@ -85,16 +85,16 @@ type SpawnParams = {
   clientFs?: FsBridgeCapabilities
 }
 
-export function resolveAnthropicOauthExtensionPath(): string {
+export function resolveAnthropicToolSchemaExtensionPath(): string {
   const candidates = [
-    new URL('./anthropic-oauth-extension.js', import.meta.url),
-    new URL('../pi-extension/anthropic-oauth.ts', import.meta.url)
+    new URL('./anthropic-tool-schema-extension.js', import.meta.url),
+    new URL('../pi-extension/anthropic-tool-schema.ts', import.meta.url)
   ]
   for (const candidate of candidates) {
     const path = fileURLToPath(candidate)
     if (existsSync(path)) return path
   }
-  throw new Error('pi-acp: Anthropic OAuth extension not found (is the package built?)')
+  throw new Error('pi-acp: Anthropic tool schema extension not found (is the package built?)')
 }
 
 export class PiRpcProcess {
@@ -159,7 +159,7 @@ export class PiRpcProcess {
     // - themes are irrelevant in rpc mode and can be noisy/slow to load.
     // Keep extensions + prompt templates enabled because ACP users may rely on them
     // (e.g. MCP extensions, prompt templates for workflows).
-    const args = ['--mode', 'rpc', '--no-themes', '--extension', resolveAnthropicOauthExtensionPath()]
+    const args = ['--mode', 'rpc', '--no-themes', '--extension', resolveAnthropicToolSchemaExtensionPath()]
     if (params.sessionPath) args.push('--session', params.sessionPath)
 
     const fsBridge = params.clientFs?.writeTextFile ? await PiFsBridge.listen(params.clientFs) : null

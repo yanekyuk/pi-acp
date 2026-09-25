@@ -188,7 +188,7 @@ Other built-in commands:
 
 ### Extensions
 
-`pi-acp` runs pi with its extensions enabled and translates their UI to ACP. For Anthropic OAuth sessions, it also loads `dist/anthropic-oauth-extension.js` to remove unsupported `minimum`/`maximum` constraints from integer fields in outgoing tool schemas. Pi's local tool validation and requests for other providers or Anthropic API keys are unchanged. It has been verified with:
+`pi-acp` runs pi with its extensions enabled and translates their UI to ACP. For Anthropic sessions (OAuth or API key), it also loads `dist/anthropic-tool-schema-extension.js` to remove unsupported `minimum`/`maximum` constraints from integer fields in outgoing tool schemas. Pi's local tool validation and requests for other providers are unchanged. It has been verified with:
 
 | Extension                                                                        | What you get in the ACP client                                                                                                                             |
 | -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
