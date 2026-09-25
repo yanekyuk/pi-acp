@@ -267,6 +267,7 @@ Project layout:
 - An ACP agent-mode selector such as Zed's native **Write** control is not advertised. Pi's current RPC protocol cannot enforce a meaningful write/read-only tool restriction, and advertising a cosmetic mode would be misleading. Model and thinking selectors are fully backed by Pi RPC.
 - Extension commands that depend on pi's terminal overlay (`ctx.ui.custom()`), e.g. `/btw` or `/mcp setup`, cannot render in ACP clients; pi-acp hides `/btw` and pi reports the limitation for others.
 - Queue is implemented client-side and should work like pi's `one-at-a-time`
+- While a question (elicitation form) is waiting for an answer, Zed's threads sidebar still shows the generating spinner instead of the waiting icon. Zed only surfaces pending permission requests there; the fix is tracked in [zed#64746](https://github.com/zed-industries/zed/pull/64746). Permission prompts (`confirm`) already show the waiting icon.
 
 ## License
 
