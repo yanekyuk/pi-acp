@@ -39,6 +39,7 @@ import { listPiSessions, findPiSession, readPiSessionTitle } from './pi-sessions
 import { normalizePiAssistantText, normalizePiMessageText } from './translate/pi-messages.js'
 import { toolResultToContent, toolResultToRawOutput } from './translate/pi-tools.js'
 import { toToolKind, toToolTitle } from './translate/extension-tools.js'
+import { formatSubagentTitle, isSubagentTool, subagentCompletionToContent } from './translate/subagent.js'
 import {
   bashCommand,
   bashExitCode,
@@ -1073,6 +1074,37 @@ export class PiAcpAgent implements ACPAgent {
         }
 
         const rawOutput = toolResultToRawOutput(m)
+
+        if (isSubagentTool(toolName)) {
+          const title = formatSubagentTitle({ args: restoredArgs, result: m, status: isError ? 'failed' : 'completed' })
+          const content = subagentCompletionToContent({ args: restoredArgs, result: m, isError })
+
+          await this.conn.sessionUpdate({
+            sessionId: session.sessionId,
+            update: {
+              sessionUpdate: 'tool_call',
+              toolCallId,
+              name: toolName,
+              title,
+              kind: toToolKind(toolName),
+              status: 'completed',
+              rawInput: restoredArgs ?? null,
+              rawOutput
+            }
+          })
+
+          await this.conn.sessionUpdate({
+            sessionId: session.sessionId,
+            update: {
+              sessionUpdate: 'tool_call_update',
+              toolCallId,
+              status: isError ? 'failed' : 'completed',
+              content: content.length > 0 ? content : null,
+              rawOutput
+            }
+          })
+          continue
+        }
 
         // Create a synthetic ACP tool call to render historic tool usage.
         await this.conn.sessionUpdate({

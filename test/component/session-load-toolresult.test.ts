@@ -234,3 +234,73 @@ test('PiAcpAgent: loadSession falls back from malformed historical arguments to 
     PiRpcProcess.spawn = originalSpawn
   }
 })
+
+test('PiAcpAgent: loadSession replays subagent results with completed title and formatted card', async () => {
+  const originalSpawn = PiRpcProcess.spawn
+  ;(PiRpcProcess as any).spawn = async () => {
+    return {
+      onEvent: () => () => {},
+      getMessages: async () => ({
+        messages: [
+          {
+            role: 'assistant',
+            content: [
+              {
+                type: 'toolCall',
+                id: 'subagent_call_1',
+                name: 'subagent',
+                arguments: { agent: 'scout', task: 'Examine DB schema' }
+              }
+            ]
+          },
+          {
+            role: 'toolResult',
+            toolCallId: 'subagent_call_1',
+            toolName: 'subagent',
+            content: [{ type: 'text', text: 'Schema analysis complete.' }],
+            details: {
+              mode: 'single',
+              results: [
+                {
+                  agent: 'scout',
+                  exitCode: 0,
+                  progressSummary: { toolCount: 5, tokens: 3200, durationMs: 4800 }
+                }
+              ]
+            },
+            isError: false
+          }
+        ]
+      }),
+      getAvailableModels: async () => ({ models: [] }),
+      getState: async () => ({ thinkingLevel: 'medium' })
+    } as any
+  }
+
+  try {
+    const conn = new FakeAgentSideConnection()
+    const agent = new PiAcpAgent(asAgentConn(conn))
+    ;(agent as any).store = new FakeStore()
+
+    await agent.loadSession({ sessionId: 's1', cwd: '/tmp/project', mcpServers: [] } as any)
+
+    const updates = conn.updates.map(u => (u as any).update)
+
+    const toolCall = updates.find(u => u?.sessionUpdate === 'tool_call')
+    assert.ok(toolCall)
+    assert.equal(toolCall.toolCallId, 'subagent_call_1')
+    assert.equal(toolCall.name, 'subagent')
+    assert.equal(toolCall.title, 'Subagent: scout (completed · 5 tools · 4.8s)')
+    assert.equal(toolCall.kind, 'other')
+    assert.equal(toolCall.status, 'completed')
+
+    const toolCallUpdate = updates.find(u => u?.sessionUpdate === 'tool_call_update')
+    assert.ok(toolCallUpdate)
+    assert.equal(toolCallUpdate.status, 'completed')
+    const cardText = toolCallUpdate.content?.[0]?.content?.text
+    assert.match(cardText, /\*\*Subagent: scout\*\* · completed \(5 tools · 3\.2k tok · 4\.8s\)/)
+    assert.match(cardText, /Schema analysis complete\./)
+  } finally {
+    PiRpcProcess.spawn = originalSpawn
+  }
+})

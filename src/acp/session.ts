@@ -28,6 +28,12 @@ import {
 } from './translate/bash.js'
 import { toolResultToContent, toolResultToRawOutput } from './translate/pi-tools.js'
 import { toToolKind, toToolTitle } from './translate/extension-tools.js'
+import {
+  formatSubagentTitle,
+  isSubagentTool,
+  subagentCompletionToContent,
+  subagentProgressToContent
+} from './translate/subagent.js'
 import { TODO_TOOL_NAME, todoResultToPlan } from './translate/plan.js'
 import { sessionStatsToUsageUpdate } from './translate/usage.js'
 import {
@@ -336,6 +342,8 @@ export class PiAcpSession {
   private currentToolCalls = new Map<string, 'pending' | 'in_progress'>()
   // Tool name per in-flight tool call, for events that omit it.
   private toolCallNames = new Map<string, string>()
+  // Tool call arguments recorded at invocation start.
+  private toolCallArgs = new Map<string, unknown>()
 
   // ACP message identity for the current pi assistant message stream.
   private currentAssistantMessageId: string | null = null
@@ -631,6 +639,7 @@ export class PiAcpSession {
   private cleanupToolCall(toolCallId: string): void {
     this.currentToolCalls.delete(toolCallId)
     this.toolCallNames.delete(toolCallId)
+    this.toolCallArgs.delete(toolCallId)
     this.fileSnapshots.delete(toolCallId)
     this.fileMutationToolCallIds.delete(toolCallId)
     this.bashToolCallIds.delete(toolCallId)
@@ -798,6 +807,8 @@ export class PiAcpSession {
                     }
                   })()
 
+            this.toolCallArgs.set(toolCallId, rawInput)
+
             const locations = toToolCallLocations(rawInput, this.cwd)
             const existingStatus = this.currentToolCalls.get(toolCallId)
             // IMPORTANT: never downgrade status (e.g. if we already marked in_progress via tool_execution_start).
@@ -854,6 +865,7 @@ export class PiAcpSession {
         let line: number | undefined
 
         this.toolCallNames.set(toolCallId, toolName)
+        this.toolCallArgs.set(toolCallId, args)
 
         if (isBashTool(toolName)) {
           const locations = toToolCallLocations(args, this.cwd)
@@ -936,6 +948,22 @@ export class PiAcpSession {
           break
         }
 
+        const toolName = this.toolCallNames.get(toolCallId)
+        if (isSubagentTool(toolName)) {
+          const args = this.toolCallArgs.get(toolCallId)
+          const title = formatSubagentTitle({ args, partialResult: partial, status: 'in_progress' })
+          const content = subagentProgressToContent({ args, partialResult: partial })
+          this.emit({
+            sessionUpdate: 'tool_call_update',
+            toolCallId,
+            status: 'in_progress',
+            ...(title ? { title } : {}),
+            content: content.length > 0 ? content : undefined,
+            rawOutput: toolResultToRawOutput(partial)
+          })
+          break
+        }
+
         const content = this.fileMutationToolCallIds.has(toolCallId) ? [] : toolResultToContent(partial)
 
         this.emit({
@@ -960,6 +988,23 @@ export class PiAcpSession {
             status: isError ? 'failed' : 'completed',
             result,
             isError
+          })
+          this.cleanupToolCall(toolCallId)
+          break
+        }
+
+        const toolName = String((ev as any).toolName ?? this.toolCallNames.get(toolCallId) ?? '')
+        if (isSubagentTool(toolName)) {
+          const args = this.toolCallArgs.get(toolCallId)
+          const title = formatSubagentTitle({ args, result, status: isError ? 'failed' : 'completed' })
+          const content = subagentCompletionToContent({ args, result, isError })
+          this.emit({
+            sessionUpdate: 'tool_call_update',
+            toolCallId,
+            status: isError ? 'failed' : 'completed',
+            ...(title ? { title } : {}),
+            content,
+            rawOutput: toolResultToRawOutput(result)
           })
           this.cleanupToolCall(toolCallId)
           break
@@ -1002,7 +1047,6 @@ export class PiAcpSession {
           ...(hasStructuredDiff ? {} : { rawOutput: toolResultToRawOutput(result) })
         })
 
-        const toolName = String((ev as any).toolName ?? this.toolCallNames.get(toolCallId) ?? '')
         this.emitPlanIfTodoResult(toolName, result)
         this.cleanupToolCall(toolCallId)
         break
