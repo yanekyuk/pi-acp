@@ -24,8 +24,9 @@ export default defineConfig([
     ...shared,
     entry: {
       'acp-fs-extension': 'src/pi-extension/acp-fs.ts',
-      'anthropic-tool-schema-extension': 'src/pi-extension/anthropic-tool-schema.ts'
+      'anthropic-tool-schema-extension': 'src/pi-extension/anthropic-tool-schema.ts',
+      'custom-select-extension': 'src/pi-extension/custom-select.ts'
     },
-    external: ['@earendil-works/pi-coding-agent']
+    external: ['@earendil-works/pi-coding-agent', '@earendil-works/pi-tui']
   }
 ])

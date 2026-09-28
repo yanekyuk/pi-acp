@@ -85,16 +85,25 @@ type SpawnParams = {
   clientFs?: FsBridgeCapabilities
 }
 
-export function resolveAnthropicToolSchemaExtensionPath(): string {
+/** Bundled `dist/<name>-extension.js` when built, `src/pi-extension/<source>.ts` in dev. */
+function resolvePiExtensionPath(name: string, source: string): string {
   const candidates = [
-    new URL('./anthropic-tool-schema-extension.js', import.meta.url),
-    new URL('../pi-extension/anthropic-tool-schema.ts', import.meta.url)
+    new URL(`./${name}-extension.js`, import.meta.url),
+    new URL(`../pi-extension/${source}.ts`, import.meta.url)
   ]
   for (const candidate of candidates) {
     const path = fileURLToPath(candidate)
     if (existsSync(path)) return path
   }
-  throw new Error('pi-acp: Anthropic tool schema extension not found (is the package built?)')
+  throw new Error(`pi-acp: ${name} extension not found (is the package built?)`)
+}
+
+export function resolveAnthropicToolSchemaExtensionPath(): string {
+  return resolvePiExtensionPath('anthropic-tool-schema', 'anthropic-tool-schema')
+}
+
+export function resolveCustomSelectExtensionPath(): string {
+  return resolvePiExtensionPath('custom-select', 'custom-select')
 }
 
 export class PiRpcProcess {
@@ -159,7 +168,15 @@ export class PiRpcProcess {
     // - themes are irrelevant in rpc mode and can be noisy/slow to load.
     // Keep extensions + prompt templates enabled because ACP users may rely on them
     // (e.g. MCP extensions, prompt templates for workflows).
-    const args = ['--mode', 'rpc', '--no-themes', '--extension', resolveAnthropicToolSchemaExtensionPath()]
+    const args = [
+      '--mode',
+      'rpc',
+      '--no-themes',
+      '--extension',
+      resolveAnthropicToolSchemaExtensionPath(),
+      '--extension',
+      resolveCustomSelectExtensionPath()
+    ]
     if (params.sessionPath) args.push('--session', params.sessionPath)
 
     const fsBridge = params.clientFs?.writeTextFile ? await PiFsBridge.listen(params.clientFs) : null

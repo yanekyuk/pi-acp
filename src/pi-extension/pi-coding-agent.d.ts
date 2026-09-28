@@ -34,9 +34,38 @@ declare module '@earendil-works/pi-coding-agent' {
   export function createEditToolDefinition(cwd: string, options?: { operations?: EditOperations }): ToolDefinition
   export function createWriteToolDefinition(cwd: string, options?: { operations?: WriteOperations }): ToolDefinition
 
+  /** pi-tui component returned by `ctx.ui.custom()` factories. */
+  export interface Component {
+    render(width: number): string[]
+    dispose?(): void
+  }
+
+  export type CustomUIFactory<T> = (
+    tui: unknown,
+    theme: unknown,
+    keybindings: unknown,
+    done: (result: T) => void
+  ) => Component | Promise<Component>
+
+  export interface ExtensionUIContext {
+    readonly theme: unknown
+    select(title: string, options: string[]): Promise<string | undefined>
+    /** Pi types this as `Promise<T>`, but RPC mode resolves `undefined` without rendering. */
+    custom<T>(factory: CustomUIFactory<T>, options?: unknown): Promise<T | undefined>
+  }
+
   export interface ExtensionContext {
     model?: { provider: string }
-    modelRegistry: { isUsingOAuth(model: { provider: string }): boolean }
+    modelRegistry: {
+      isUsingOAuth(model: { provider: string }): boolean
+      /** Runtime-private model runtime; not part of pi's public extension API. */
+      runtime?: unknown
+    }
+  }
+
+  export interface SessionStartContext extends ExtensionContext {
+    hasUI: boolean
+    ui: ExtensionUIContext
   }
 
   export interface ExtensionAPI {
@@ -45,5 +74,17 @@ declare module '@earendil-works/pi-coding-agent' {
       event: 'before_provider_request',
       handler: (event: { payload: unknown }, ctx: ExtensionContext) => unknown
     ): () => void
+    on(event: 'session_start', handler: (event: unknown, ctx: SessionStartContext) => unknown): () => void
+  }
+}
+
+/** pi-tui classes observed by the custom-select bridge; pi aliases this module like the one above. */
+declare module '@earendil-works/pi-tui' {
+  export class SelectList {
+    render(width: number): string[]
+  }
+
+  export class Text {
+    render(width: number): string[]
   }
 }

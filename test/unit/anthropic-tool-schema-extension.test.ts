@@ -2,7 +2,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
 import anthropicToolSchemaExtension, {
-  normalizeAnthropicToolSchemas
+  normalizeAnthropicToolSchemas,
+  normalizeRuntimeAnthropicRequests
 } from '../../src/pi-extension/anthropic-tool-schema.js'
 
 const payload = {
@@ -63,8 +64,7 @@ test('normalizes Anthropic requests with OAuth or API key, but not other provide
   const pi: ExtensionAPI = {
     registerTool() {},
     on(event, callback) {
-      assert.equal(event, 'before_provider_request')
-      handler = callback
+      if (event === 'before_provider_request') handler = callback as typeof handler
       return () => {}
     }
   }
@@ -80,4 +80,71 @@ test('normalizes Anthropic requests with OAuth or API key, but not other provide
   assert.equal(handler({ payload }, { ...context('anthropic', true), model: undefined }), undefined)
   assert.deepEqual(handler({ payload }, context('anthropic', true)), normalizeAnthropicToolSchemas(payload))
   assert.deepEqual(handler({ payload }, context('anthropic', false)), normalizeAnthropicToolSchemas(payload))
+})
+
+type OnPayload = (payload: unknown, model: { provider?: string }) => unknown
+
+/** Fake model runtime: records options and runs `onPayload` the way a provider would. */
+function fakeRuntime() {
+  const sent: unknown[] = []
+  const runtime = {
+    async streamSimple(model: { provider?: string }, _context: unknown, options?: { onPayload?: OnPayload }) {
+      const next = await options?.onPayload?.(payload, model)
+      sent.push(next ?? payload)
+      return options
+    }
+  }
+  return { runtime, sent }
+}
+
+test('normalizes Anthropic requests made directly through the model runtime', async () => {
+  const { runtime, sent } = fakeRuntime()
+  normalizeRuntimeAnthropicRequests(runtime)
+
+  await runtime.streamSimple({ provider: 'anthropic' }, {}, {})
+  await runtime.streamSimple({ provider: 'openai-codex' }, {}, {})
+
+  assert.deepEqual(sent, [normalizeAnthropicToolSchemas(payload), payload])
+})
+
+test('runtime normalization composes with an existing onPayload hook and wraps once', async () => {
+  const { runtime, sent } = fakeRuntime()
+  normalizeRuntimeAnthropicRequests(runtime)
+  normalizeRuntimeAnthropicRequests(runtime)
+
+  const tagged = { ...payload, metadata: { tagged: true } }
+  const calls: unknown[] = []
+  await runtime.streamSimple(
+    { provider: 'anthropic' },
+    {},
+    {
+      onPayload: (next: unknown) => {
+        calls.push(next)
+        return tagged
+      }
+    }
+  )
+
+  assert.equal(calls.length, 1)
+  assert.deepEqual(sent, [normalizeAnthropicToolSchemas(tagged)])
+})
+
+test('session_start wraps the model registry runtime; unknown registry shapes are ignored', async () => {
+  let onSessionStart: ((event: unknown, ctx: ExtensionContext) => unknown) | undefined
+  const pi: ExtensionAPI = {
+    registerTool() {},
+    on(event, callback) {
+      if (event === 'session_start') onSessionStart = callback as typeof onSessionStart
+      return () => {}
+    }
+  }
+  anthropicToolSchemaExtension(pi)
+  assert.ok(onSessionStart)
+
+  const { runtime, sent } = fakeRuntime()
+  onSessionStart({}, { modelRegistry: { isUsingOAuth: () => true, runtime } })
+  onSessionStart({}, { modelRegistry: { isUsingOAuth: () => true } })
+  await runtime.streamSimple({ provider: 'anthropic' }, {}, {})
+
+  assert.deepEqual(sent, [normalizeAnthropicToolSchemas(payload)])
 })
