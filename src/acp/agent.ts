@@ -450,17 +450,18 @@ export class PiAcpAgent implements ACPAgent {
     const quietStartup = getQuietStartup(params.cwd)
     const updateNotice = buildUpdateNotice()
 
-    // If quietStartup is enabled, suppress the full "startup info" prelude, but still surface
-    // the "New version available" notice (if any) since it's high-signal and actionable.
-    const preludeText = quietStartup
-      ? updateNotice
-        ? updateNotice + '\n'
-        : ''
-      : buildStartupInfo({
-          cwd: params.cwd,
-          fileCommands,
-          updateNotice
-        })
+    // Even in quiet mode, keep the actionable update notice.
+    const preludeText =
+      quietStartup === true
+        ? updateNotice
+          ? updateNotice + '\n'
+          : ''
+        : buildStartupInfo({
+            cwd: params.cwd,
+            fileCommands,
+            updateNotice,
+            headerOnly: quietStartup === 'header'
+          })
 
     if (preludeText) session.setStartupInfo(preludeText)
 
@@ -1710,6 +1711,7 @@ function buildStartupInfo(opts: {
   cwd: string
   fileCommands: ReturnType<typeof loadSlashCommands>
   updateNotice: string | null
+  headerOnly: boolean
 }): string {
   void opts.fileCommands
 
@@ -1729,6 +1731,11 @@ function buildStartupInfo(opts: {
     }
   } catch {
     // ignore
+  }
+
+  if (opts.headerOnly) {
+    if (opts.updateNotice) md.push(opts.updateNotice)
+    return md.join('\n').trim() + '\n'
   }
 
   const addSection = (title: string, items: string[]) => {

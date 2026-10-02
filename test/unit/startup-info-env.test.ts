@@ -1,5 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { PiAcpAgent } from '../../src/acp/agent.js'
 import { FakeAgentSideConnection, asAgentConn } from '../helpers/fakes.js'
 
@@ -10,18 +13,13 @@ class FakeSessions {
   }
 }
 
-test('PiAcpAgent: quietStartup=true disables startup info generation/emission', async () => {
+async function startupInfoWithSetting(quietStartup: boolean | 'header') {
   const prevAgentDir = process.env.PI_CODING_AGENT_DIR
-
-  // Force quietStartup in pi settings by pointing PI_CODING_AGENT_DIR at a temp dir.
-  const { mkdtempSync, writeFileSync } = await import('node:fs')
-  const { tmpdir } = await import('node:os')
-  const { join } = await import('node:path')
   const dir = mkdtempSync(join(tmpdir(), 'pi-acp-quietstartup-'))
-  writeFileSync(join(dir, 'settings.json'), JSON.stringify({ quietStartup: true }, null, 2), 'utf-8')
+  writeFileSync(join(dir, 'settings.json'), JSON.stringify({ quietStartup }), 'utf-8')
   process.env.PI_CODING_AGENT_DIR = dir
 
-  // Spy on setTimeout calls (agent schedules startup info + available commands)
+  // Agent schedules startup info and available commands after creating the session.
   const realSetTimeout = globalThis.setTimeout
   const timeouts: Array<unknown> = []
   ;(globalThis as any).setTimeout = (fn: unknown, _ms?: number) => {
@@ -31,7 +29,6 @@ test('PiAcpAgent: quietStartup=true disables startup info generation/emission', 
 
   try {
     const conn = new FakeAgentSideConnection()
-
     let setStartupInfoCalled = false
     const session = {
       sessionId: 's1',
@@ -50,32 +47,46 @@ test('PiAcpAgent: quietStartup=true disables startup info generation/emission', 
       setStartupInfo(_text: string) {
         setStartupInfoCalled = true
       },
-      sendStartupInfoIfPending() {
-        // may be called when an update notice is available
-      }
+      sendStartupInfoIfPending() {}
     }
 
     const agent = new PiAcpAgent(asAgentConn(conn), {} as any)
     ;(agent as any).sessions = new FakeSessions(session) as any
 
     const res = await agent.newSession({ cwd: process.cwd(), mcpServers: [] } as any)
-
-    const startupInfo = res?._meta?.piAcp?.startupInfo ?? null
-
-    // When quietStartup=true the full prelude is suppressed. However, an update notice
-    // (if one exists) is still surfaced because it's high-signal and actionable.
-    // The test must tolerate both cases since the live npm check may or may not find an update.
-    if (startupInfo) {
-      assert.match(startupInfo, /New version available/)
-      assert.equal(setStartupInfoCalled, true)
-      assert.equal(timeouts.length, 2)
-    } else {
-      assert.equal(setStartupInfoCalled, false)
-      assert.equal(timeouts.length, 1)
+    return {
+      startupInfo: (res?._meta?.piAcp?.startupInfo ?? null) as string | null,
+      setStartupInfoCalled,
+      scheduledCallbacks: timeouts.length
     }
   } finally {
     ;(globalThis as any).setTimeout = realSetTimeout
     if (prevAgentDir == null) delete process.env.PI_CODING_AGENT_DIR
     else process.env.PI_CODING_AGENT_DIR = prevAgentDir
+    rmSync(dir, { recursive: true, force: true })
   }
+}
+
+test('PiAcpAgent: quietStartup=true hides startup info but retains an update notice', async () => {
+  const { startupInfo, setStartupInfoCalled, scheduledCallbacks } = await startupInfoWithSetting(true)
+
+  // The live npm check may or may not find an update.
+  if (startupInfo) {
+    assert.match(startupInfo, /New version available/)
+    assert.equal(setStartupInfoCalled, true)
+    assert.equal(scheduledCallbacks, 2)
+  } else {
+    assert.equal(setStartupInfoCalled, false)
+    assert.equal(scheduledCallbacks, 1)
+  }
+})
+
+test('PiAcpAgent: quietStartup="header" keeps the version, not resource sections', async () => {
+  const { startupInfo, setStartupInfoCalled, scheduledCallbacks } = await startupInfoWithSetting('header')
+
+  assert.ok(startupInfo)
+  assert.match(startupInfo, /^pi v\d+/)
+  assert.doesNotMatch(startupInfo, /## (Context|Skills|Prompts|Extensions)/)
+  assert.equal(setStartupInfoCalled, true)
+  assert.equal(scheduledCallbacks, 2)
 })
