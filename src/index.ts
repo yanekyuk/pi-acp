@@ -1,6 +1,10 @@
 import { AgentSideConnection, ndJsonStream } from '@agentclientprotocol/sdk'
 import { PiAcpAgent } from './acp/agent.js'
+import { configurePiAgentDirectory } from './pi-rpc/agent-environment.js'
 import { getPiCommand, shouldUseShellForPiCommand } from './pi-rpc/command.js'
+
+configurePiAgentDirectory(process.env)
+
 // Terminal Auth entrypoint. The ACP client launches the agent with `--terminal-login`.
 if (process.argv.includes('--terminal-login')) {
   const { spawnSync } = await import('node:child_process')

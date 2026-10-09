@@ -1701,7 +1701,7 @@ function buildUpdateNotice(): string | null {
     if (!latest || !isSemver(latest)) return null
     if (compareSemver(latest, installed) <= 0) return null
 
-    return `New version available: v${latest} (installed v${installed}). Run: \`npm i -g @earendil-works/pi-coding-agent\``
+    return `New version available: v${latest} (installed v${installed}). Run: \`pi update --all\``
   } catch {
     return null
   }

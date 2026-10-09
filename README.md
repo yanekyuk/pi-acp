@@ -126,6 +126,7 @@ Point your ACP client to the built `dist/index.js`:
 
 ### Environment variables
 
+- `pi-acp` uses Pi's default agent directory (`~/.pi/agent`) when launched from another Pi session, rather than inheriting that session's `PI_CODING_AGENT_DIR`. Set `PI_ACP_AGENT_DIR` to explicitly choose a directory in this case. Outside a Pi session, `PI_CODING_AGENT_DIR` continues to work as usual. This applies to ACP sessions and `--terminal-login`.
 - Embedded ACP context is enabled by default so clients such as Zed can attach rich context.
 - Set `PI_ACP_ENABLE_EMBEDDED_CONTEXT=false` to opt out.
 - When disabled, compliant ACP clients should avoid sending embedded `resource` blocks. If they send them anyway, `pi-acp` still degrades gracefully by converting them into plain-text prompt context.
