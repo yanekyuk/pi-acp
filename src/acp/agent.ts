@@ -61,6 +61,7 @@ import { existsSync, readFileSync, realpathSync, readdirSync, statSync, unlinkSy
 import type { AvailableCommand } from '@agentclientprotocol/sdk'
 import { join, dirname, basename } from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { getPiCommand, shouldUseShellForPiCommand } from '../pi-rpc/command.js'
 
 type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
 type AdvertisedModel = {
@@ -448,7 +449,8 @@ export class PiAcpAgent implements ACPAgent {
     })
 
     const quietStartup = getQuietStartup(params.cwd)
-    const updateNotice = buildUpdateNotice()
+    const piCmd = getPiCommand(process.env.PI_ACP_PI_COMMAND)
+    const updateNotice = buildUpdateNotice(piCmd)
 
     // Even in quiet mode, keep the actionable update notice.
     const preludeText =
@@ -460,7 +462,8 @@ export class PiAcpAgent implements ACPAgent {
             cwd: params.cwd,
             fileCommands,
             updateNotice,
-            headerOnly: quietStartup === 'header'
+            headerOnly: quietStartup === 'header',
+            piCmd
           })
 
     if (preludeText) session.setStartupInfo(preludeText)
@@ -731,13 +734,17 @@ export class PiAcpAgent implements ACPAgent {
           // 1) Locate the installed pi package by resolving the `pi` executable.
           // On Node installs, `pi` typically resolves to .../@earendil-works/pi-coding-agent/dist/cli.js
           try {
-            const whichCmd = process.platform === 'win32' ? 'where' : 'which'
-            const which = spawnSync(whichCmd, ['pi'], { encoding: 'utf-8' })
-            const piPath = String(which.stdout ?? '')
-              .split(/\r?\n/)[0]
-              ?.trim()
+            const piCmd = getPiCommand(process.env.PI_ACP_PI_COMMAND)
+            let piPath = isAbsolute(piCmd) || piCmd.includes('/') || piCmd.includes('\\') ? piCmd : null
+            if (!piPath) {
+              const whichCmd = process.platform === 'win32' ? 'where' : 'which'
+              const which = spawnSync(whichCmd, [piCmd], { encoding: 'utf-8' })
+              piPath = String(which.stdout ?? '')
+                .split(/\r?\n/)[0]
+                ?.trim() || null
+            }
 
-            if (piPath) {
+            if (piPath && existsSync(piPath)) {
               const resolved = realpathSync(piPath)
               const pkgRoot = dirname(dirname(resolved))
               const p = join(pkgRoot, 'CHANGELOG.md')
@@ -1678,11 +1685,14 @@ function compareSemver(a: string, b: string): number {
   return 0
 }
 
-function buildUpdateNotice(): string | null {
+function buildUpdateNotice(piCmd: string = getPiCommand(process.env.PI_ACP_PI_COMMAND)): string | null {
   // Best-effort update check against npm registry.
   // Important: keep it fast to not slow down session/new.
   try {
-    const piVersion = spawnSync('pi', ['--version'], { encoding: 'utf-8' })
+    const piVersion = spawnSync(piCmd, ['--version'], {
+      encoding: 'utf-8',
+      shell: shouldUseShellForPiCommand(piCmd)
+    })
     const installed = (String(piVersion.stdout ?? '').trim() || String(piVersion.stderr ?? '').trim()).replace(
       /^v/i,
       ''
@@ -1712,14 +1722,19 @@ function buildStartupInfo(opts: {
   fileCommands: ReturnType<typeof loadSlashCommands>
   updateNotice: string | null
   headerOnly: boolean
+  piCmd?: string
 }): string {
   void opts.fileCommands
 
   const md: string[] = []
+  const piCmd = opts.piCmd ?? getPiCommand(process.env.PI_ACP_PI_COMMAND)
 
   // pi version header
   try {
-    const piVersion = spawnSync('pi', ['--version'], { encoding: 'utf-8' })
+    const piVersion = spawnSync(piCmd, ['--version'], {
+      encoding: 'utf-8',
+      shell: shouldUseShellForPiCommand(piCmd)
+    })
     const installed = (String(piVersion.stdout ?? '').trim() || String(piVersion.stderr ?? '').trim()).replace(
       /^v/i,
       ''
