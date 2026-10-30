@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PiAcpAgent } from '../../src/acp/agent.js'
@@ -15,9 +15,23 @@ class FakeSessions {
 
 async function startupInfoWithSetting(quietStartup: boolean | 'header') {
   const prevAgentDir = process.env.PI_CODING_AGENT_DIR
+  const prevPiCmd = process.env.PI_ACP_PI_COMMAND
   const dir = mkdtempSync(join(tmpdir(), 'pi-acp-quietstartup-'))
   writeFileSync(join(dir, 'settings.json'), JSON.stringify({ quietStartup }), 'utf-8')
   process.env.PI_CODING_AGENT_DIR = dir
+
+  const fakePi = join(dir, process.platform === 'win32' ? 'fake-pi.cmd' : 'fake-pi')
+  writeFileSync(
+    fakePi,
+    process.platform === 'win32' ? '@echo 1.0.0\r\n' : '#!/bin/sh\necho 1.0.0\n',
+    { mode: 0o755 }
+  )
+  try {
+    chmodSync(fakePi, 0o755)
+  } catch {
+    // ignore
+  }
+  process.env.PI_ACP_PI_COMMAND = fakePi
 
   // Agent schedules startup info and available commands after creating the session.
   const realSetTimeout = globalThis.setTimeout
@@ -63,6 +77,8 @@ async function startupInfoWithSetting(quietStartup: boolean | 'header') {
     ;(globalThis as any).setTimeout = realSetTimeout
     if (prevAgentDir == null) delete process.env.PI_CODING_AGENT_DIR
     else process.env.PI_CODING_AGENT_DIR = prevAgentDir
+    if (prevPiCmd == null) delete process.env.PI_ACP_PI_COMMAND
+    else process.env.PI_ACP_PI_COMMAND = prevPiCmd
     rmSync(dir, { recursive: true, force: true })
   }
 }
